@@ -62,7 +62,7 @@ func main() {
 			}
 			interrupter := itn.New(cfg)
 			if options.interactive {
-				p := tea.NewProgram(tui.NewModel(ctx, interrupter))
+				p := tea.NewProgram(tui.NewModel(ctx, interrupter), tea.WithAltScreen())
 				if err := p.Start(); err != nil {
 					fmt.Printf("❌ Error initializing TUI: %v", err)
 					os.Exit(1)
@@ -77,6 +77,67 @@ func main() {
 			cli.PrintMonitor(experiment, events)
 		},
 	}
+	installCmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install helper integrations",
+	}
+	var k9sDir string
+	k9sPluginCmd := &cobra.Command{
+		Use:   "k9s-plugin",
+		Short: "Install the k9s plugin configuration for ec2-spot-interrupter",
+		Run: func(cmd *cobra.Command, _ []string) {
+			result, err := cli.InstallK9sPlugin(k9sDir)
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			if result.BackupFile != "" {
+				fmt.Printf("🗂️  Backed up existing plugin config to %s\n", result.BackupFile)
+			}
+			if result.Installed {
+				fmt.Printf("✅ Installed k9s plugin in %s\n", result.PluginFile)
+			} else {
+				fmt.Printf("ℹ️  k9s plugin already configured in %s\n", result.PluginFile)
+			}
+			fmt.Println("Restart k9s (or reload plugins) and press Shift-I to launch.")
+		},
+	}
+	k9sPluginCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/.k9s)")
+	installCmd.AddCommand(k9sPluginCmd)
+
+	k9sCmd := &cobra.Command{
+		Use:   "k9s",
+		Short: "k9s integration commands",
+	}
+	var k9sNode string
+	interruptNodeCmd := &cobra.Command{
+		Use:   "interrupt-node",
+		Short: "Interrupt the EC2 Spot instance matching a node hint",
+		Run: func(cmd *cobra.Command, _ []string) {
+			ctx := context.Background()
+			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			interrupter := itn.New(cfg)
+			err = cli.InterruptNodeFromK9s(ctx, interrupter, cli.K9sInterruptNodeOptions{
+				NodeHint: k9sNode,
+				Delay:    options.delay,
+				Clean:    options.clean,
+			})
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	interruptNodeCmd.Flags().StringVar(&k9sNode, "node", "", "node hint (node name/FQDN/instance-id)")
+	k9sCmd.AddCommand(interruptNodeCmd)
+
+	rootCmd.AddCommand(installCmd)
+	rootCmd.AddCommand(k9sCmd)
+
 	rootCmd.PersistentFlags().StringSliceVarP(&options.instanceIDs, "instance-ids", "i", []string{}, "instance IDs to interrupt")
 	rootCmd.PersistentFlags().BoolVarP(&options.clean, "clean", "c", true, "clean up the underlying simulations")
 	rootCmd.PersistentFlags().DurationVarP(&options.delay, "delay", "d", time.Second*15, "duration until the interruption notification is sent")

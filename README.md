@@ -11,6 +11,49 @@ brew tap aws/tap
 brew install ec2-spot-interrupter
 ```
 
+## Use as a k9s Plugin
+
+Install via the CLI:
+
+```bash
+ec2-spot-interrupter install k9s-plugin
+```
+
+Optional: specify a custom k9s config path:
+
+```bash
+ec2-spot-interrupter install k9s-plugin --k9s-dir /path/to/.k9s
+```
+
+This adds an `ec2-spot-interrupter` plugin to `~/.k9s/plugins.yaml` scoped to `nodes`.
+The plugin runs in the background and keeps you on the k9s Node view.
+
+Use it from k9s Node view:
+1. Restart k9s (or reload plugins).
+2. Highlight a node.
+3. Press `Shift-I`.
+
+What happens:
+1. k9s passes the selected node name as env var `SPOT_INTERRUPTER_NODE`.
+2. The CLI resolves that hint to a running Spot EC2 instance using AWS APIs only.
+3. The CLI runs the same interruption flow used by normal non-TUI mode (`Interrupt` + monitor output).
+
+If you want to use a specific AWS profile/region from k9s, set `AWS_PROFILE` and `AWS_REGION` in the shell where k9s is launched.
+You can also run it directly:
+
+```bash
+ec2-spot-interrupter k9s interrupt-node --node <node-name-or-fqdn-or-instance-id>
+```
+
+Requirements:
+1. Your AWS identity needs permissions for EC2/FIS/IAM used by this tool.
+2. Node hints should map to a single running Spot instance. Resolution supports:
+   - exact EC2 instance ID (`i-...`)
+   - hints containing an instance ID (for resource-based naming patterns)
+   - exact EC2 `Name` tag match
+   - exact private DNS name match
+   - exact public DNS name match
+
 ## About
 
 [Amazon EC2 Spot](https://aws.amazon.com/ec2/spot/) Instances let you run flexible, fault-tolerant, or stateless applications in the AWS Cloud at up to a 90% discount from On-Demand prices. 
@@ -48,6 +91,12 @@ Try the interactive TUI mode:
 ```bash
 $ ec2-spot-interrupter --interactive
 ```
+
+Interactive shortcuts:
+1. `enter` starts an interruption for selected instances.
+2. `b` returns from experiment watch back to the full instance list.
+3. `e` opens the latest active (or most recent) experiment watch view.
+4. `[` / `]` (or `p` / `n`) switch between tracked experiments.
 
 Or use the regular CLI options:
 

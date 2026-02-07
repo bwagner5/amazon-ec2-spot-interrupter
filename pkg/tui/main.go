@@ -22,47 +22,124 @@ import (
 
 	"github.com/aws/amazon-ec2-spot-interrupter/pkg/itn"
 	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-var helpStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241")).Render
-
 const refreshInterval = 10 * time.Second
-const tableWindowSize = 18
+
+var (
+	frameStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
+	titleStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("69"))
+)
+
+type listKeyMap struct {
+	Up        key.Binding
+	Down      key.Binding
+	Select    key.Binding
+	SelectAll key.Binding
+	Clear     key.Binding
+	Refresh   key.Binding
+	Monitor   key.Binding
+	Open      key.Binding
+	Quit      key.Binding
+}
+
+func (k listKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Select, k.Open, k.Monitor, k.Quit}
+}
+
+func (k listKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{{k.Up, k.Down, k.Select, k.SelectAll}, {k.Clear, k.Refresh, k.Monitor, k.Open, k.Quit}}
+}
+
+func defaultListKeys() listKeyMap {
+	return listKeyMap{
+		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Select:    key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
+		SelectAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all running")),
+		Clear:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "clear")),
+		Refresh:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+		Monitor:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "open experiment")),
+		Open:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "interrupt")),
+		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	}
+}
 
 type model struct {
 	instances    []ec2types.Instance
-	cursor       int
 	selected     map[string]struct{}
 	ctx          context.Context
 	itn          *itn.ITN
 	initialized  bool
 	spinner      spinner.Model
+	help         help.Model
+	keys         listKeyMap
+	table        table.Model
 	status       string
 	lastRefresh  time.Time
 	loading      bool
 	listingError error
+	width        int
+	height       int
+	hub          *experimentHub
 }
 
 type spotInstancesMsg struct {
 	instances []ec2types.Instance
 	err       error
 }
+
 type retrySpotInstances time.Time
 
 func NewModel(ctx context.Context, itnClient *itn.ITN) model {
+	return newModelWithHub(ctx, itnClient, newExperimentHub())
+}
+
+func newModelWithHub(ctx context.Context, itnClient *itn.ITN, hub *experimentHub) model {
 	sp := spinner.New()
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("206"))
 	sp.Spinner = spinner.Points
+
+	tbl := table.New(
+		table.WithColumns([]table.Column{
+			{Title: "SEL", Width: 5},
+			{Title: "INSTANCE", Width: 20},
+			{Title: "NAME", Width: 24},
+			{Title: "STATE", Width: 12},
+			{Title: "AZ", Width: 11},
+			{Title: "TYPE", Width: 13},
+			{Title: "EXP(A/T)", Width: 9},
+			{Title: "PROGRESS", Width: 14},
+			{Title: "EVENT", Width: 34},
+		}),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+	styles := table.DefaultStyles()
+	styles.Header = styles.Header.Foreground(lipgloss.Color("86")).Bold(true)
+	styles.Selected = styles.Selected.Foreground(lipgloss.Color("229")).Background(lipgloss.Color("57")).Bold(true)
+	tbl.SetStyles(styles)
+
+	h := help.New()
+	h.ShowAll = false
+
 	return model{
 		selected: map[string]struct{}{},
 		ctx:      ctx,
 		itn:      itnClient,
 		spinner:  sp,
+		help:     h,
+		keys:     defaultListKeys(),
+		table:    tbl,
 		status:   "Loading Spot instances...",
 		loading:  true,
+		hub:      hub,
 	}
 }
 
@@ -80,15 +157,62 @@ func scheduleRefresh() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(
-		spinner.Tick,
-		loadSpotInstances(m.ctx, m.itn),
-		scheduleRefresh(),
-	)
+	return tea.Batch(spinner.Tick, loadSpotInstances(m.ctx, m.itn), scheduleRefresh(), tea.WindowSize())
+}
+
+func (m *model) syncRows() {
+	rows := make([]table.Row, 0, len(m.instances))
+	for _, inst := range m.instances {
+		id := instanceID(inst)
+		sel := "[ ]"
+		if _, ok := m.selected[id]; ok {
+			sel = "[x]"
+		}
+		expStatus, progress, event := m.hub.RowStatus(id)
+		rows = append(rows, table.Row{
+			sel,
+			id,
+			truncate(instanceName(inst), 24),
+			string(inst.State.Name),
+			instanceAZ(inst),
+			string(inst.InstanceType),
+			expStatus,
+			progress,
+			truncate(event, 34),
+		})
+	}
+	m.table.SetRows(rows)
+	if len(rows) == 0 {
+		m.table.SetCursor(0)
+		return
+	}
+	if m.table.Cursor() >= len(rows) {
+		m.table.SetCursor(len(rows) - 1)
+	}
+}
+
+func (m *model) resize() {
+	if m.width == 0 {
+		m.width = 120
+	}
+	if m.height == 0 {
+		m.height = 40
+	}
+	helpHeight := lipgloss.Height(m.help.View(m.keys))
+	tableHeight := m.height - helpHeight - 7
+	if tableHeight < 5 {
+		tableHeight = 5
+	}
+	m.table.SetHeight(tableHeight)
+	m.table.SetWidth(m.width - 4)
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resize()
 	case spotInstancesMsg:
 		m.loading = false
 		m.initialized = true
@@ -110,11 +234,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return leftID < rightID
 		})
 		m.pruneSelection()
-		if m.cursor >= len(m.instances) && len(m.instances) > 0 {
-			m.cursor = len(m.instances) - 1
-		}
+		m.syncRows()
 		if len(m.instances) == 0 {
-			m.cursor = 0
 			m.status = "No Spot instances found in this account/region"
 		} else {
 			m.status = fmt.Sprintf("Loaded %d Spot instances", len(m.instances))
@@ -127,47 +248,64 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
+		m.syncRows()
 		return m, cmd
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c", "q":
+		switch {
+		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
-		case "up", "k":
-			if m.cursor > 0 {
-				m.cursor--
+		case key.Matches(msg, m.keys.Up):
+			if m.table.Cursor() > 0 {
+				m.table.SetCursor(m.table.Cursor() - 1)
 			}
-		case "down", "j":
-			if m.cursor < len(m.instances)-1 {
-				m.cursor++
+			return m, nil
+		case key.Matches(msg, m.keys.Down):
+			if m.table.Cursor() < len(m.table.Rows())-1 {
+				m.table.SetCursor(m.table.Cursor() + 1)
 			}
-		case "g":
-			m.cursor = 0
-		case "G":
-			if len(m.instances) > 0 {
-				m.cursor = len(m.instances) - 1
-			}
-		case " ":
+			return m, nil
+		case key.Matches(msg, m.keys.Select):
 			m.toggleSelectionAtCursor()
-		case "a":
+			m.syncRows()
+			return m, nil
+		case key.Matches(msg, m.keys.SelectAll):
 			m.selectAllRunnable()
-		case "x":
+			m.syncRows()
+			return m, nil
+		case key.Matches(msg, m.keys.Clear):
 			m.selected = map[string]struct{}{}
 			m.status = "Selection cleared"
-		case "r":
+			m.syncRows()
+			return m, nil
+		case key.Matches(msg, m.keys.Refresh):
 			m.loading = true
 			m.status = "Refreshing Spot instance list..."
 			return m, loadSpotInstances(m.ctx, m.itn)
-		case "enter":
+		case key.Matches(msg, m.keys.Open):
 			selectedInstances := m.selectedInstances()
 			if len(selectedInstances) == 0 {
 				m.status = "Select at least one running Spot instance"
 				return m, nil
 			}
-			opts := NewOptions(m.ctx, m.itn, selectedInstances)
+			opts := NewOptions(m.ctx, m.itn, m.hub, selectedInstances)
 			return opts, opts.Init()
+		case key.Matches(msg, m.keys.Monitor):
+			id := m.hub.LatestID(true)
+			if id == "" {
+				id = m.hub.LatestID(false)
+			}
+			if id == "" {
+				m.status = "No experiments yet. Start one with enter."
+				return m, nil
+			}
+			monitor := NewMonitor(m.ctx, m.itn, m.hub, id)
+			return monitor, monitor.Init()
 		}
 	}
-	return m, nil
+
+	var cmd tea.Cmd
+	m.table, cmd = m.table.Update(msg)
+	return m, cmd
 }
 
 func (m *model) pruneSelection() {
@@ -183,10 +321,11 @@ func (m *model) pruneSelection() {
 }
 
 func (m *model) toggleSelectionAtCursor() {
-	if len(m.instances) == 0 || m.cursor >= len(m.instances) {
+	rowIdx := m.table.Cursor()
+	if rowIdx < 0 || rowIdx >= len(m.instances) {
 		return
 	}
-	inst := m.instances[m.cursor]
+	inst := m.instances[rowIdx]
 	id := instanceID(inst)
 	if !isRunnable(inst) {
 		m.status = fmt.Sprintf("%s is %s (only running instances can be interrupted)", id, string(inst.State.Name))
@@ -250,13 +389,6 @@ func isRunnable(i ec2types.Instance) bool {
 	return i.State.Name == ec2types.InstanceStateNameRunning
 }
 
-func checked(isSelected bool) string {
-	if isSelected {
-		return "[x]"
-	}
-	return "[ ]"
-}
-
 func truncate(v string, width int) string {
 	if len(v) <= width {
 		return v
@@ -267,82 +399,41 @@ func truncate(v string, width int) string {
 	return v[:width-3] + "..."
 }
 
-func (m model) tableRange() (int, int) {
-	if len(m.instances) <= tableWindowSize {
-		return 0, len(m.instances)
-	}
-	start := m.cursor - (tableWindowSize / 2)
-	if start < 0 {
-		start = 0
-	}
-	end := start + tableWindowSize
-	if end > len(m.instances) {
-		end = len(m.instances)
-		start = end - tableWindowSize
-	}
-	return start, end
-}
-
 func (m model) View() string {
+	if m.width == 0 || m.height == 0 {
+		m.width, m.height = 120, 40
+		m.resize()
+	}
 	if !m.initialized {
-		return fmt.Sprintf("Loading Spot instances %s\n%s", m.spinner.View(), help())
+		loading := fmt.Sprintf("Loading Spot instances %s", m.spinner.View())
+		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, loading)
 	}
 
-	var b strings.Builder
 	selectedCount := len(m.selectedInstances())
-	runnableCount := 0
+	runningCount := 0
 	for _, inst := range m.instances {
 		if isRunnable(inst) {
-			runnableCount++
+			runningCount++
 		}
 	}
-
-	statusSuffix := ""
+	status := m.status
 	if m.loading {
-		statusSuffix = " " + m.spinner.View()
+		status = status + " " + m.spinner.View()
 	}
 	if !m.lastRefresh.IsZero() {
-		statusSuffix += fmt.Sprintf("  last refresh: %s", m.lastRefresh.Format("15:04:05"))
+		status += fmt.Sprintf("  | last refresh %s", m.lastRefresh.Format("15:04:05"))
 	}
-
-	b.WriteString(fmt.Sprintf("Spot Interrupter  instances=%d running=%d selected=%d%s\n", len(m.instances), runnableCount, selectedCount, statusSuffix))
-	b.WriteString(fmt.Sprintf("status: %s\n\n", m.status))
-
 	if m.listingError != nil {
-		b.WriteString(fmt.Sprintf("error: %v\n\n", m.listingError))
+		status += fmt.Sprintf("  | error: %v", m.listingError)
 	}
 
-	b.WriteString("    SEL  INSTANCE ID         NAME                       STATE         AZ         TYPE\n")
-	b.WriteString("    ---  ------------------  -------------------------  ------------  ---------  -------------\n")
+	header := titleStyle.Render("EC2 Spot Interrupter") + "\n" +
+		fmt.Sprintf("instances=%d running=%d selected=%d active-experiments=%d\n", len(m.instances), runningCount, selectedCount, m.hub.RunningCount()) +
+		status
 
-	start, end := m.tableRange()
-	for i := start; i < end; i++ {
-		inst := m.instances[i]
-		cursor := " "
-		if m.cursor == i {
-			cursor = ">"
-		}
-		id := instanceID(inst)
-		_, isSelected := m.selected[id]
-		b.WriteString(fmt.Sprintf(
-			"%s   %s  %-18s  %-25s  %-12s  %-9s  %-13s\n",
-			cursor,
-			checked(isSelected),
-			id,
-			truncate(instanceName(inst), 25),
-			string(inst.State.Name),
-			instanceAZ(inst),
-			string(inst.InstanceType),
-		))
-	}
+	content := frameStyle.Width(m.width - 2).Render(m.table.View())
+	helpView := m.help.View(m.keys)
 
-	if len(m.instances) > tableWindowSize {
-		b.WriteString(fmt.Sprintf("\nshowing %d-%d of %d\n", start+1, end, len(m.instances)))
-	}
-	b.WriteString(help())
-	return b.String()
-}
-
-func help() string {
-	return helpStyle("\nKeys: j/k or arrows move | space select | a select running | x clear | r refresh | enter interrupt | q quit\n")
+	ui := strings.Join([]string{header, "", content, helpView}, "\n")
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, ui)
 }

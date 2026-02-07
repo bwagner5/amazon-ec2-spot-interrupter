@@ -28,13 +28,14 @@ type options struct {
 	instances      []*ec2types.Instance
 	ctx            context.Context
 	itn            *itn.ITN
+	hub            *experimentHub
 	textInput      textinput.Model
 	validationMsg  string
 	processingOpts bool
 	errorMsg       string
 }
 
-func NewOptions(ctx context.Context, itn *itn.ITN, instances []*ec2types.Instance) options {
+func NewOptions(ctx context.Context, itn *itn.ITN, hub *experimentHub, instances []*ec2types.Instance) options {
 	ti := textinput.New()
 	ti.SetValue("15s")
 	ti.Focus()
@@ -43,6 +44,7 @@ func NewOptions(ctx context.Context, itn *itn.ITN, instances []*ec2types.Instanc
 	return options{
 		ctx:       ctx,
 		itn:       itn,
+		hub:       hub,
 		instances: instances,
 		textInput: ti,
 	}
@@ -72,7 +74,8 @@ func (o options) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			o.errorMsg = fmt.Sprintf("❌ %s", err)
 			return o, nil
 		}
-		monitor := NewMonitor(experiment, events)
+		experimentID := o.hub.Track(experiment, o.instances, events)
+		monitor := NewMonitor(o.ctx, o.itn, o.hub, experimentID)
 		return monitor, monitor.Init()
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -101,7 +104,7 @@ func (o *options) validateDelay() (time.Duration, error) {
 
 func (o options) View() string {
 	if o.processingOpts {
-		return fmt.Sprintf("Creating Interruption Experiment \n%s", help())
+		return fmt.Sprintf("Creating Interruption Experiment \n%s", optionsHelp())
 	}
 	errMsg := ""
 	if o.errorMsg != "" {
@@ -113,6 +116,10 @@ func (o options) View() string {
 		o.textInput.View(),
 		o.validationMsg,
 		errMsg,
-		help(),
+		optionsHelp(),
 	)
+}
+
+func optionsHelp() string {
+	return "\nPress enter to continue, q to quit.\n"
 }

@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -55,9 +56,10 @@ const (
 				"Sid": "AllowFISExperimentRoleSpotInstanceActions",
 				"Effect": "Allow",
 				"Action": [
-					"ec2:SendSpotInstanceInterruptions"
+					"ec2:SendSpotInstanceInterruptions",
+					"ec2:DescribeInstances"
 				],
-				"Resource": "arn:aws:ec2:*:*:instance/*"
+				"Resource": "*"
 			}
 		]
 	}`
@@ -65,6 +67,8 @@ const (
 	fisRoleName    = "aws-fis-itn"
 	fisTargetLimit = 5
 )
+
+var instanceIDInStringRegex = regexp.MustCompile(`i-[a-z0-9]{8,}`)
 
 type ITN struct {
 	cfg       aws.Config
@@ -89,6 +93,12 @@ func New(cfg aws.Config) *ITN {
 func (i ITN) Interrupt(ctx context.Context, instanceIDs []string, delay time.Duration, clean bool) (*types.Experiment, <-chan Event, error) {
 	if err := i.validate(ctx, instanceIDs); err != nil {
 		return nil, nil, err
+	}
+	if delay < 0 {
+		return nil, nil, errors.New("delay cannot be negative")
+	}
+	if delay > 13*time.Minute {
+		return nil, nil, errors.New("delay must be <= 13m (FIS requires interruption at <= 15m and includes a fixed 2m warning window)")
 	}
 	experiment, err := i.createInterruptions(ctx, instanceIDs, delay)
 	if err != nil {
@@ -166,6 +176,85 @@ func (i ITN) SpotInstances(ctx context.Context) ([]ec2types.Instance, error) {
 	return instances, nil
 }
 
+func (i ITN) ResolveInstanceIDFromNodeHint(ctx context.Context, nodeHint string) (string, error) {
+	hint := strings.TrimSpace(nodeHint)
+	if hint == "" {
+		return "", errors.New("empty node hint")
+	}
+
+	if extracted := instanceIDInStringRegex.FindString(hint); extracted != "" {
+		if _, err := i.validateHintTarget(ctx, extracted); err == nil {
+			return extracted, nil
+		}
+	}
+
+	if _, err := i.validateHintTarget(ctx, hint); err == nil {
+		return hint, nil
+	}
+
+	paginator := ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   aws.String("instance-lifecycle"),
+				Values: []string{string(ec2types.InstanceLifecycleSpot)},
+			},
+			{
+				Name:   aws.String("instance-state-name"),
+				Values: []string{string(ec2types.InstanceStateNameRunning)},
+			},
+			{
+				Name:   aws.String("tag:Name"),
+				Values: []string{hint},
+			},
+		},
+	})
+	if id, err := i.extractSingleInstanceID(ctx, paginator); err == nil {
+		return id, nil
+	}
+
+	paginator = ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   aws.String("instance-lifecycle"),
+				Values: []string{string(ec2types.InstanceLifecycleSpot)},
+			},
+			{
+				Name:   aws.String("instance-state-name"),
+				Values: []string{string(ec2types.InstanceStateNameRunning)},
+			},
+			{
+				Name:   aws.String("private-dns-name"),
+				Values: []string{hint},
+			},
+		},
+	})
+	if id, err := i.extractSingleInstanceID(ctx, paginator); err == nil {
+		return id, nil
+	}
+
+	paginator = ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{
+				Name:   aws.String("instance-lifecycle"),
+				Values: []string{string(ec2types.InstanceLifecycleSpot)},
+			},
+			{
+				Name:   aws.String("instance-state-name"),
+				Values: []string{string(ec2types.InstanceStateNameRunning)},
+			},
+			{
+				Name:   aws.String("dns-name"),
+				Values: []string{hint},
+			},
+		},
+	})
+	if id, err := i.extractSingleInstanceID(ctx, paginator); err == nil {
+		return id, nil
+	}
+
+	return "", fmt.Errorf("unable to resolve node hint %q to a single running Spot instance", hint)
+}
+
 // Clean deletes the generated experiment template from FIS
 func (i ITN) Clean(ctx context.Context, experiment types.Experiment) error {
 	_, err := i.fisClient.DeleteExperimentTemplate(ctx, &fis.DeleteExperimentTemplateInput{Id: experiment.ExperimentTemplateId})
@@ -194,151 +283,144 @@ const (
 
 func (i ITN) monitor(ctx context.Context, events chan Event, experiment *types.Experiment, delay time.Duration) error {
 	instanceIDs := i.experimentInstanceIDs(experiment)
-	events <- Event{
-		Stage:     EventStageRebalanceSent,
-		Timestamp: time.Now(),
-		Message:   "✅ Rebalance Recommendation sent",
-	}
-	if experiment.StartTime != nil && time.Until(*experiment.StartTime) < delay {
-		timeUntilStart := delay - time.Until(*experiment.StartTime)
-		events <- Event{
-			Stage:     EventStageWarningScheduled,
-			Message:   fmt.Sprintf("⏳ Interruption will be sent in %d seconds", int(timeUntilStart.Seconds())),
-			NextEvent: timeUntilStart,
-			Timestamp: time.Now(),
-		}
-		time.Sleep(timeUntilStart)
-	}
+	rebalanceSent := false
+	warningSent := false
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	var lastStatus types.ExperimentStatus
-	var statusInitialized bool
+	var warningTimer *time.Timer
+	terminatingSeen := map[string]struct{}{}
+	terminatedSeen := map[string]struct{}{}
 	for {
 		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-warningTimerChan(warningTimer):
+			events <- Event{
+				Stage:     EventStageWarningSent,
+				Timestamp: time.Now(),
+				Message:   "✅ Spot 2-minute Interruption Notification sent",
+				NextEvent: time.Minute * 2,
+			}
+			warningSent = true
+			warningTimer = nil
 		case <-ticker.C:
 			experimentUpdate, err := i.fisClient.GetExperiment(ctx, &fis.GetExperimentInput{Id: experiment.Id})
 			if err != nil {
 				return err
 			}
 			status := experimentUpdate.Experiment.State.Status
-			changed := !statusInitialized || status != lastStatus
-			if changed {
-				statusInitialized = true
-				lastStatus = status
+			if !rebalanceSent && i.isSpotActionInitiated(status) {
+				events <- Event{
+					Stage:     EventStageRebalanceSent,
+					Timestamp: time.Now(),
+					Message:   "✅ Rebalance Recommendation sent",
+				}
+				rebalanceSent = true
+				if delay > 0 {
+					events <- Event{
+						Stage:     EventStageWarningScheduled,
+						Message:   fmt.Sprintf("⏳ Interruption warning scheduled in %d seconds", int(delay.Seconds())),
+						NextEvent: delay,
+						Timestamp: time.Now(),
+					}
+					warningTimer = time.NewTimer(delay)
+					defer warningTimer.Stop()
+				} else {
+					events <- Event{
+						Stage:     EventStageWarningSent,
+						Timestamp: time.Now(),
+						Message:   "✅ Spot 2-minute Interruption Notification sent",
+						NextEvent: time.Minute * 2,
+					}
+					warningSent = true
+				}
 			}
 			switch status {
-			case types.ExperimentStatusPending:
-				if changed {
-					events <- Event{
-						Stage:     EventStageExperimentUpdate,
-						Timestamp: time.Now(),
-						Message:   "⏰ Interruption Experiment is pending",
-					}
-				}
-			case types.ExperimentStatusInitiating:
-				if changed {
-					events <- Event{
-						Stage:     EventStageExperimentUpdate,
-						Timestamp: time.Now(),
-						Message:   "🔧 Interruption Experiment is initializing",
-					}
-				}
 			case types.ExperimentStatusFailed, types.ExperimentStatusStopped:
 				reason := "experiment failed"
 				if experimentUpdate.Experiment.State.Reason != nil {
 					reason = *experimentUpdate.Experiment.State.Reason
 				}
 				return errors.New(reason)
-			case types.ExperimentStatusCompleted:
-				events <- Event{
-					Stage:     EventStageWarningSent,
-					Timestamp: time.Now(),
-					Message:   "✅ Spot 2-minute Interruption Notification sent",
-					NextEvent: time.Minute * 2,
-				}
-				return i.monitorTermination(ctx, events, instanceIDs)
 			}
-		case <-ctx.Done():
-			return ctx.Err()
+
+			states, err := i.describeInstanceStates(ctx, instanceIDs)
+			if err != nil {
+				return err
+			}
+			i.emitStateChanges(events, instanceIDs, states, terminatingSeen, terminatedSeen)
+
+			if warningSent && i.allInstancesFinal(instanceIDs, states, terminatedSeen) {
+				events <- Event{
+					Stage:          EventStageInstanceTerminated,
+					Timestamp:      time.Now(),
+					Message:        "✅ Spot Instance Shutdown sent",
+					InstanceStates: states,
+				}
+				return nil
+			}
 		}
 	}
 }
 
-func (i ITN) monitorTermination(ctx context.Context, events chan Event, instanceIDs []string) error {
-	terminatingSeen := map[string]struct{}{}
-	terminatedSeen := map[string]struct{}{}
+func (i ITN) isSpotActionInitiated(status types.ExperimentStatus) bool {
+	return status == types.ExperimentStatusInitiating || status == types.ExperimentStatusRunning || status == types.ExperimentStatusCompleted
+}
 
-	emitStateChanges := func(states map[string]string) {
-		for _, id := range instanceIDs {
-			state, ok := states[id]
-			if !ok {
-				continue
-			}
-			switch state {
-			case string(ec2types.InstanceStateNameShuttingDown), string(ec2types.InstanceStateNameStopping):
-				if _, seen := terminatingSeen[id]; !seen {
-					terminatingSeen[id] = struct{}{}
-					events <- Event{
-						Stage:     EventStageInstanceTerminating,
-						Timestamp: time.Now(),
-						Message:   fmt.Sprintf("🔻 Instance %s is terminating (%s)", id, state),
-						InstanceStates: map[string]string{
-							id: state,
-						},
-					}
+func warningTimerChan(timer *time.Timer) <-chan time.Time {
+	if timer == nil {
+		return nil
+	}
+	return timer.C
+}
+
+func (i ITN) emitStateChanges(events chan Event, instanceIDs []string, states map[string]string, terminatingSeen map[string]struct{}, terminatedSeen map[string]struct{}) {
+	for _, id := range instanceIDs {
+		state, ok := states[id]
+		if !ok {
+			continue
+		}
+		switch state {
+		case string(ec2types.InstanceStateNameShuttingDown), string(ec2types.InstanceStateNameStopping):
+			if _, seen := terminatingSeen[id]; !seen {
+				terminatingSeen[id] = struct{}{}
+				events <- Event{
+					Stage:     EventStageInstanceTerminating,
+					Timestamp: time.Now(),
+					Message:   fmt.Sprintf("🔻 Instance %s is terminating (%s)", id, state),
+					InstanceStates: map[string]string{
+						id: state,
+					},
 				}
-			case string(ec2types.InstanceStateNameTerminated):
-				if _, seen := terminatedSeen[id]; !seen {
-					terminatedSeen[id] = struct{}{}
-					events <- Event{
-						Stage:     EventStageInstanceTerminated,
-						Timestamp: time.Now(),
-						Message:   fmt.Sprintf("✅ Instance %s terminated", id),
-						InstanceStates: map[string]string{
-							id: state,
-						},
-					}
+			}
+		case string(ec2types.InstanceStateNameTerminated), string(ec2types.InstanceStateNameStopped):
+			if _, seen := terminatedSeen[id]; !seen {
+				terminatedSeen[id] = struct{}{}
+				events <- Event{
+					Stage:     EventStageInstanceTerminated,
+					Timestamp: time.Now(),
+					Message:   fmt.Sprintf("✅ Instance %s reached final state (%s)", id, state),
+					InstanceStates: map[string]string{
+						id: state,
+					},
 				}
 			}
 		}
 	}
+}
 
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		states, err := i.describeInstanceStates(ctx, instanceIDs)
-		if err != nil {
-			return err
+func (i ITN) allInstancesFinal(instanceIDs []string, states map[string]string, finalSeen map[string]struct{}) bool {
+	for _, id := range instanceIDs {
+		state := states[id]
+		if state == string(ec2types.InstanceStateNameTerminated) || state == string(ec2types.InstanceStateNameStopped) {
+			continue
 		}
-		emitStateChanges(states)
-
-		allTerminated := true
-		for _, id := range instanceIDs {
-			if states[id] != string(ec2types.InstanceStateNameTerminated) {
-				if _, seen := terminatedSeen[id]; seen {
-					continue
-				}
-				allTerminated = false
-				break
-			}
+		if _, seen := finalSeen[id]; seen {
+			continue
 		}
-		if allTerminated {
-			events <- Event{
-				Stage:          EventStageInstanceTerminated,
-				Timestamp:      time.Now(),
-				Message:        "✅ Spot Instance Shutdown sent",
-				InstanceStates: states,
-			}
-			return nil
-		}
-
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+		return false
 	}
+	return true
 }
 
 func (i ITN) describeInstanceStates(ctx context.Context, instanceIDs []string) (map[string]string, error) {
@@ -485,4 +567,52 @@ func (i ITN) experimentInstanceIDs(experiment *types.Experiment) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func (i ITN) validateHintTarget(ctx context.Context, candidate string) (*ec2types.Instance, error) {
+	paginator := ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
+		InstanceIds: []string{candidate},
+	})
+	instance, err := i.extractSingleInstance(ctx, paginator)
+	if err != nil {
+		return nil, err
+	}
+	if instance.InstanceLifecycle != ec2types.InstanceLifecycleTypeSpot {
+		return nil, errors.New("target is not a Spot instance")
+	}
+	if instance.State.Name != ec2types.InstanceStateNameRunning {
+		return nil, errors.New("target Spot instance is not running")
+	}
+	return &instance, nil
+}
+
+func (i ITN) extractSingleInstanceID(ctx context.Context, paginator *ec2.DescribeInstancesPaginator) (string, error) {
+	instance, err := i.extractSingleInstance(ctx, paginator)
+	if err != nil {
+		return "", err
+	}
+	if instance.InstanceId == nil {
+		return "", errors.New("instance id missing")
+	}
+	return *instance.InstanceId, nil
+}
+
+func (i ITN) extractSingleInstance(ctx context.Context, paginator *ec2.DescribeInstancesPaginator) (ec2types.Instance, error) {
+	matches := []ec2types.Instance{}
+	for paginator.HasMorePages() {
+		out, err := paginator.NextPage(ctx)
+		if err != nil {
+			return ec2types.Instance{}, err
+		}
+		for _, reservation := range out.Reservations {
+			matches = append(matches, reservation.Instances...)
+			if len(matches) > 1 {
+				return ec2types.Instance{}, errors.New("multiple matching instances found")
+			}
+		}
+	}
+	if len(matches) == 0 {
+		return ec2types.Instance{}, errors.New("no matching instances found")
+	}
+	return matches[0], nil
 }
