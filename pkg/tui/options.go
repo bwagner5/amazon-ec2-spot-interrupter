@@ -31,6 +31,7 @@ type options struct {
 	textInput      textinput.Model
 	validationMsg  string
 	processingOpts bool
+	errorMsg       string
 }
 
 func NewOptions(ctx context.Context, itn *itn.ITN, instances []*ec2types.Instance) options {
@@ -63,13 +64,13 @@ func (o options) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		delay, err := o.validateDelay()
 		if err != nil {
-			o.textInput, cmd = o.textInput.Update(msg)
 			return o, cmd
 		}
 		experiment, events, err := o.itn.Interrupt(o.ctx, instanceIDs, delay, true)
 		if err != nil {
-			fmt.Printf("❌ %s\n", err)
-			return o, tea.Quit
+			o.processingOpts = false
+			o.errorMsg = fmt.Sprintf("❌ %s", err)
+			return o, nil
 		}
 		monitor := NewMonitor(experiment, events)
 		return monitor, monitor.Init()
@@ -102,10 +103,16 @@ func (o options) View() string {
 	if o.processingOpts {
 		return fmt.Sprintf("Creating Interruption Experiment \n%s", help())
 	}
+	errMsg := ""
+	if o.errorMsg != "" {
+		errMsg = fmt.Sprintf("%s\n", o.errorMsg)
+	}
 	return fmt.Sprintf(
-		"How long to wait before sending the interruption notifications?\n%s\n%s\n%s",
+		"Interrupting %d Spot instance(s)\nHow long to wait before sending the interruption notifications?\n%s\n%s\n%s%s",
+		len(o.instances),
 		o.textInput.View(),
 		o.validationMsg,
+		errMsg,
 		help(),
 	)
 }

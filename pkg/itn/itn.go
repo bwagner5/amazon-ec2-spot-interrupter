@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -150,10 +151,6 @@ func (i ITN) SpotInstances(ctx context.Context) ([]ec2types.Instance, error) {
 				Name:   aws.String("instance-lifecycle"),
 				Values: []string{string(ec2types.InstanceLifecycleSpot)},
 			},
-			{
-				Name:   aws.String("instance-state-name"),
-				Values: []string{string(ec2types.InstanceStateNameRunning)},
-			},
 		},
 	})
 	var instances []ec2types.Instance
@@ -176,19 +173,36 @@ func (i ITN) Clean(ctx context.Context, experiment types.Experiment) error {
 }
 
 type Event struct {
-	Message   string
-	NextEvent time.Duration
-	Timestamp time.Time
+	Stage          EventStage
+	Message        string
+	NextEvent      time.Duration
+	Timestamp      time.Time
+	InstanceStates map[string]string
 }
 
+type EventStage string
+
+const (
+	EventStageUnknown             EventStage = "unknown"
+	EventStageRebalanceSent       EventStage = "rebalance-sent"
+	EventStageWarningScheduled    EventStage = "warning-scheduled"
+	EventStageExperimentUpdate    EventStage = "experiment-update"
+	EventStageWarningSent         EventStage = "warning-sent"
+	EventStageInstanceTerminating EventStage = "instance-terminating"
+	EventStageInstanceTerminated  EventStage = "instance-terminated"
+)
+
 func (i ITN) monitor(ctx context.Context, events chan Event, experiment *types.Experiment, delay time.Duration) error {
+	instanceIDs := i.experimentInstanceIDs(experiment)
 	events <- Event{
+		Stage:     EventStageRebalanceSent,
 		Timestamp: time.Now(),
 		Message:   "✅ Rebalance Recommendation sent",
 	}
 	if experiment.StartTime != nil && time.Until(*experiment.StartTime) < delay {
 		timeUntilStart := delay - time.Until(*experiment.StartTime)
 		events <- Event{
+			Stage:     EventStageWarningScheduled,
 			Message:   fmt.Sprintf("⏳ Interruption will be sent in %d seconds", int(timeUntilStart.Seconds())),
 			NextEvent: timeUntilStart,
 			Timestamp: time.Now(),
@@ -196,6 +210,9 @@ func (i ITN) monitor(ctx context.Context, events chan Event, experiment *types.E
 		time.Sleep(timeUntilStart)
 	}
 	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	var lastStatus types.ExperimentStatus
+	var statusInitialized bool
 	for {
 		select {
 		case <-ticker.C:
@@ -203,36 +220,150 @@ func (i ITN) monitor(ctx context.Context, events chan Event, experiment *types.E
 			if err != nil {
 				return err
 			}
-			switch experimentUpdate.Experiment.State.Status {
+			status := experimentUpdate.Experiment.State.Status
+			changed := !statusInitialized || status != lastStatus
+			if changed {
+				statusInitialized = true
+				lastStatus = status
+			}
+			switch status {
 			case types.ExperimentStatusPending:
-				events <- Event{
-					Timestamp: time.Now(),
-					Message:   "⏰ Interruption Experiment is pending",
+				if changed {
+					events <- Event{
+						Stage:     EventStageExperimentUpdate,
+						Timestamp: time.Now(),
+						Message:   "⏰ Interruption Experiment is pending",
+					}
 				}
 			case types.ExperimentStatusInitiating:
-				events <- Event{
-					Timestamp: time.Now(),
-					Message:   "🔧 Interruption Experiment is initializing",
+				if changed {
+					events <- Event{
+						Stage:     EventStageExperimentUpdate,
+						Timestamp: time.Now(),
+						Message:   "🔧 Interruption Experiment is initializing",
+					}
 				}
 			case types.ExperimentStatusFailed, types.ExperimentStatusStopped:
-				return errors.New(*experimentUpdate.Experiment.State.Reason)
+				reason := "experiment failed"
+				if experimentUpdate.Experiment.State.Reason != nil {
+					reason = *experimentUpdate.Experiment.State.Reason
+				}
+				return errors.New(reason)
 			case types.ExperimentStatusCompleted:
 				events <- Event{
+					Stage:     EventStageWarningSent,
 					Timestamp: time.Now(),
 					Message:   "✅ Spot 2-minute Interruption Notification sent",
 					NextEvent: time.Minute * 2,
 				}
-				time.Sleep(2 * time.Minute)
-				events <- Event{
-					Timestamp: time.Now(),
-					Message:   "✅ Spot Instance Shutdown sent",
-				}
-				return nil
+				return i.monitorTermination(ctx, events, instanceIDs)
 			}
 		case <-ctx.Done():
-			return fmt.Errorf("timed out")
+			return ctx.Err()
 		}
 	}
+}
+
+func (i ITN) monitorTermination(ctx context.Context, events chan Event, instanceIDs []string) error {
+	terminatingSeen := map[string]struct{}{}
+	terminatedSeen := map[string]struct{}{}
+
+	emitStateChanges := func(states map[string]string) {
+		for _, id := range instanceIDs {
+			state, ok := states[id]
+			if !ok {
+				continue
+			}
+			switch state {
+			case string(ec2types.InstanceStateNameShuttingDown), string(ec2types.InstanceStateNameStopping):
+				if _, seen := terminatingSeen[id]; !seen {
+					terminatingSeen[id] = struct{}{}
+					events <- Event{
+						Stage:     EventStageInstanceTerminating,
+						Timestamp: time.Now(),
+						Message:   fmt.Sprintf("🔻 Instance %s is terminating (%s)", id, state),
+						InstanceStates: map[string]string{
+							id: state,
+						},
+					}
+				}
+			case string(ec2types.InstanceStateNameTerminated):
+				if _, seen := terminatedSeen[id]; !seen {
+					terminatedSeen[id] = struct{}{}
+					events <- Event{
+						Stage:     EventStageInstanceTerminated,
+						Timestamp: time.Now(),
+						Message:   fmt.Sprintf("✅ Instance %s terminated", id),
+						InstanceStates: map[string]string{
+							id: state,
+						},
+					}
+				}
+			}
+		}
+	}
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		states, err := i.describeInstanceStates(ctx, instanceIDs)
+		if err != nil {
+			return err
+		}
+		emitStateChanges(states)
+
+		allTerminated := true
+		for _, id := range instanceIDs {
+			if states[id] != string(ec2types.InstanceStateNameTerminated) {
+				if _, seen := terminatedSeen[id]; seen {
+					continue
+				}
+				allTerminated = false
+				break
+			}
+		}
+		if allTerminated {
+			events <- Event{
+				Stage:          EventStageInstanceTerminated,
+				Timestamp:      time.Now(),
+				Message:        "✅ Spot Instance Shutdown sent",
+				InstanceStates: states,
+			}
+			return nil
+		}
+
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
+func (i ITN) describeInstanceStates(ctx context.Context, instanceIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(instanceIDs) == 0 {
+		return out, nil
+	}
+	paginator := ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
+		InstanceIds: instanceIDs,
+	})
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, reservation := range page.Reservations {
+			for _, instance := range reservation.Instances {
+				if instance.InstanceId == nil {
+					continue
+				}
+				out[*instance.InstanceId] = string(instance.State.Name)
+			}
+		}
+	}
+	return out, nil
 }
 
 func (i ITN) createInterruptions(ctx context.Context, instanceIDs []string, delay time.Duration) (*types.Experiment, error) {
@@ -296,26 +427,29 @@ func (i ITN) batchInstances(instanceIDs []string, size int) [][]string {
 }
 
 func (i ITN) getOrCreateFISRole(ctx context.Context, accountID string) (*string, error) {
+	roleName := fisRoleName
+	roleARN := fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, fisRoleName)
 	out, err := i.iamClient.CreateRole(ctx, &iam.CreateRoleInput{
-		RoleName:                 ptr.String(fisRoleName),
+		RoleName:                 ptr.String(roleName),
 		AssumeRolePolicyDocument: ptr.String(trustPolicy),
 	})
 	var alreadyExists *iamtypes.EntityAlreadyExistsException
 	if errors.As(err, &alreadyExists) {
-		return ptr.String(fmt.Sprintf("arn:aws:iam::%s:role/%s", accountID, fisRoleName)), nil
-	}
-	if err != nil {
+		// continue so we always enforce/refresh policy attachment
+	} else if err != nil {
 		return nil, err
+	} else if out.Role != nil && out.Role.Arn != nil {
+		roleARN = *out.Role.Arn
 	}
 	_, err = i.iamClient.PutRolePolicy(ctx, &iam.PutRolePolicyInput{
 		PolicyName:     ptr.String(fmt.Sprintf("%s-policy", fisRoleName)),
 		PolicyDocument: ptr.String(rolePolicy),
-		RoleName:       out.Role.RoleName,
+		RoleName:       ptr.String(roleName),
 	})
 	if err != nil {
 		return nil, err
 	}
-	return out.Role.Arn, nil
+	return ptr.String(roleARN), nil
 }
 
 func (i ITN) getAccountID(ctx context.Context) (string, error) {
@@ -336,4 +470,19 @@ func (i ITN) instanceIDsToARNs(instanceIDs []string, region string, accountID st
 
 func ARNToInstanceID(arn string) string {
 	return strings.Split(strings.Split(arn, ":")[5], "/")[1]
+}
+
+func (i ITN) experimentInstanceIDs(experiment *types.Experiment) []string {
+	ids := map[string]struct{}{}
+	for _, target := range experiment.Targets {
+		for _, arn := range target.ResourceArns {
+			ids[ARNToInstanceID(arn)] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(ids))
+	for id := range ids {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out
 }
