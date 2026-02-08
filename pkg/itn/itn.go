@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -73,6 +74,7 @@ var instanceIDInStringRegex = regexp.MustCompile(`i-[a-z0-9]{8,}`)
 
 type ITN struct {
 	cfg       aws.Config
+	endpoint  string
 	stsClient stsAPI
 	fisClient fisAPI
 	iamClient iamAPI
@@ -83,6 +85,10 @@ func (i ITN) Region() string {
 	return i.cfg.Region
 }
 
+func (i ITN) Endpoint() string {
+	return i.endpoint
+}
+
 type RegionQueryProgress struct {
 	Region    string
 	Completed int
@@ -90,13 +96,79 @@ type RegionQueryProgress struct {
 }
 
 func New(cfg aws.Config) *ITN {
+	return NewWithEndpoint(cfg, "")
+}
+
+func NewWithEndpoint(cfg aws.Config, endpoint string) *ITN {
+	resolved := resolveEndpoint(endpoint)
+	if resolved != "" && isMockEndpoint(resolved) {
+		return newMockEndpointITN(cfg, resolved)
+	}
 	return &ITN{
 		cfg:       cfg,
-		stsClient: sts.NewFromConfig(cfg),
-		fisClient: fis.NewFromConfig(cfg),
-		iamClient: iam.NewFromConfig(cfg),
-		ec2Client: ec2.NewFromConfig(cfg),
+		endpoint:  resolved,
+		stsClient: newSTSClient(cfg, resolved),
+		fisClient: newFISClient(cfg, resolved),
+		iamClient: newIAMClient(cfg, resolved),
+		ec2Client: newEC2Client(cfg, resolved),
 	}
+}
+
+func resolveEndpoint(override string) string {
+	if strings.TrimSpace(override) != "" {
+		return normalizeEndpoint(strings.TrimSpace(override))
+	}
+	if env := strings.TrimSpace(os.Getenv("ENDPOINT")); env != "" {
+		return normalizeEndpoint(env)
+	}
+	return ""
+}
+
+func normalizeEndpoint(v string) string {
+	if strings.HasPrefix(v, "http://") || strings.HasPrefix(v, "https://") {
+		return v
+	}
+	return "http://" + v
+}
+
+func newEC2Client(cfg aws.Config, endpoint string) ec2API {
+	cfgCopy := cfg
+	if cfgCopy.Region == "" || strings.EqualFold(cfgCopy.Region, "global") {
+		cfgCopy.Region = "us-east-1"
+	}
+	if endpoint == "" {
+		return ec2.NewFromConfig(cfgCopy)
+	}
+	return ec2.NewFromConfig(cfgCopy, func(o *ec2.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+	})
+}
+
+func newFISClient(cfg aws.Config, endpoint string) fisAPI {
+	if endpoint == "" {
+		return fis.NewFromConfig(cfg)
+	}
+	return fis.NewFromConfig(cfg, func(o *fis.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+	})
+}
+
+func newIAMClient(cfg aws.Config, endpoint string) iamAPI {
+	if endpoint == "" {
+		return iam.NewFromConfig(cfg)
+	}
+	return iam.NewFromConfig(cfg, func(o *iam.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+	})
+}
+
+func newSTSClient(cfg aws.Config, endpoint string) stsAPI {
+	if endpoint == "" {
+		return sts.NewFromConfig(cfg)
+	}
+	return sts.NewFromConfig(cfg, func(o *sts.Options) {
+		o.BaseEndpoint = aws.String(endpoint)
+	})
 }
 
 // Interrupt will start an FIS experiment to send Spot ITNs to the instance IDs specified and then monitor
@@ -120,7 +192,9 @@ func (i ITN) Interrupt(ctx context.Context, instanceIDs []string, delay time.Dur
 		defer close(events)
 		if clean {
 			defer func() {
-				if err := i.Clean(ctx, *experiment); err != nil {
+				cleanCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := i.Clean(cleanCtx, *experiment); err != nil {
 					events <- Event{
 						Timestamp: time.Now(),
 						Message:   fmt.Sprintf("❌ Error cleaning up FIS Experiment: %v", err),
@@ -243,12 +317,7 @@ func (i ITN) SpotInstancesInRegions(ctx context.Context, regions []string, progr
 }
 
 func (i ITN) ListRegions(ctx context.Context) ([]string, error) {
-	cfg := i.cfg
-	if cfg.Region == "" || strings.EqualFold(cfg.Region, "global") {
-		cfg.Region = "us-east-1"
-	}
-	ec2Client := ec2.NewFromConfig(cfg)
-	out, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(false)})
+	out, err := i.ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(false)})
 	if err != nil {
 		return nil, err
 	}
@@ -405,7 +474,7 @@ func (i ITN) resolveInstancesByIDGlobal(ctx context.Context, instanceIDs []strin
 func (i ITN) withRegion(region string) *ITN {
 	cfg := i.cfg
 	cfg.Region = region
-	return New(cfg)
+	return NewWithEndpoint(cfg, i.endpoint)
 }
 
 func (i ITN) spotInstancesSingleRegion(ctx context.Context) ([]ec2types.Instance, error) {
@@ -574,7 +643,23 @@ func (i ITN) monitor(ctx context.Context, events chan Event, experiment *types.E
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			if experiment != nil && experiment.Id != nil {
+				events <- Event{
+					Stage:     EventStageExperimentUpdate,
+					Timestamp: time.Now(),
+					Message:   fmt.Sprintf("🛑 Cancellation received; stopping experiment %s", *experiment.Id),
+				}
+				stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				if err := i.stopExperiment(stopCtx, *experiment.Id); err != nil {
+					events <- Event{
+						Stage:     EventStageExperimentUpdate,
+						Timestamp: time.Now(),
+						Message:   fmt.Sprintf("❌ Failed to stop experiment %s: %v", *experiment.Id, err),
+					}
+				}
+				cancel()
+			}
+			return nil
 		case <-warningTimerChan(warningTimer):
 			events <- Event{
 				Stage:     EventStageWarningSent,
@@ -642,6 +727,14 @@ func (i ITN) monitor(ctx context.Context, events chan Event, experiment *types.E
 			}
 		}
 	}
+}
+
+func (i ITN) stopExperiment(ctx context.Context, experimentID string) error {
+	if strings.TrimSpace(experimentID) == "" {
+		return nil
+	}
+	_, err := i.fisClient.StopExperiment(ctx, &fis.StopExperimentInput{Id: aws.String(experimentID)})
+	return err
 }
 
 func (i ITN) isSpotActionInitiated(status types.ExperimentStatus) bool {

@@ -78,12 +78,31 @@ Usage:
 Flags:
   -c, --clean                  clean up the underlying simulations (default true)
   -d, --delay duration         duration until the interruption notification is sent (default 15s)
+      --filter stringArray     AWS-style filter selector, e.g. Name=tag:Name,Values=worker-a
   -h, --help                   help for ec2-spot-interrupter
   -i, --instance-ids strings   instance IDs to interrupt
+      --endpoint string        override AWS API endpoint (also supports ENDPOINT env var)
       --interactive            interactive TUI
+  -o, --output string          report output format: none,json,yaml,table,markdown (default "none")
   -p, --profile string         the AWS Profile
   -r, --region string          the AWS Region
   -v, --version                the version
+```
+
+Non-interactive target selection supports either instance IDs or AWS-style filters:
+
+```bash
+# by explicit IDs
+ec2-spot-interrupter --instance-ids i-0123456789abcdef0,i-0abcdef0123456789
+
+# by tag key/value
+ec2-spot-interrupter --filter Name=tag:Name,Values=my-node
+
+# by tag key only (any value)
+ec2-spot-interrupter --filter Name=tag:Environment
+
+# emit a machine-readable report
+ec2-spot-interrupter --filter Name=tag:Name,Values=my-node --output json
 ```
 
 Try the interactive TUI mode:
@@ -115,6 +134,71 @@ $ ec2-spot-interrupter --instance-ids i-0208a716009d70b36
 2022-05-18T11:40:05: ✅ Spot 2-minute Interruption Notification sent
 2022-05-18T11:42:05: ✅ Spot Instance Shutdown sent
 ```
+
+Run randomized chaos non-interactively:
+
+```bash
+# confirm before starting
+ec2-spot-interrupter chaos \
+  --filter Name=tag:Name,Values=my-node-pool \
+  --max-at-once 3 \
+  --min-wait 5m
+
+# skip confirmation
+ec2-spot-interrupter chaos \
+  --instance-ids i-0123456789abcdef0 \
+  --force
+
+# chaos with markdown reports per interruption cycle
+ec2-spot-interrupter chaos \
+  --filter Name=tag:Name,Values=my-node-pool \
+  --output markdown \
+  --force
+```
+
+Notes for `chaos`:
+1. `--force` skips the confirmation prompt.
+2. `--min-wait` is used for both the minimum pause between chaos cycles and the minimum instance warm-up time since launch.
+3. `--max-at-once` default is dynamic (`0`), which means one-third of currently eligible instances.
+4. `--output` applies to both targeted interruption mode and chaos mode.
+
+## Local Mock AWS Simulator
+
+You can run a local mock AWS environment to test behavior without real AWS APIs:
+
+```bash
+go run ./cmd/mockaws --scale small
+```
+
+This starts an HTTP server (default `:18080`) with realistic EC2/FIS/IAM-like endpoints:
+1. `GET /api/ec2/regions`
+2. `GET /api/ec2/instances?region=<region>&state=running`
+3. `POST /api/iam/role?name=aws-fis-itn`
+4. `POST /api/fis/experiments`
+5. `GET /api/fis/experiments/{id}`
+6. `GET /api/fis/experiments/{id}/events`
+7. `POST /api/fis/experiments/{id}/stop`
+
+At startup, `mockaws` prints the exact `ENDPOINT` export line to use. You can run:
+
+```bash
+export ENDPOINT=http://127.0.0.1:18080
+ec2-spot-interrupter --endpoint "$ENDPOINT" --instance-ids i-12345678
+```
+
+The simulator continuously churns Spot instances (mostly long-running) and applies interruption progression for mock FIS experiments.
+
+Scale presets:
+1. `--scale small` (default, ~40 instances)
+2. `--scale medium` (~250 instances)
+3. `--scale large` (~2000 instances)
+
+Useful tuning flags:
+1. `--instances` override target instance count
+2. `--regions` comma-separated regions (example `us-east-1,us-west-2,eu-west-1`)
+3. `--min-run` and `--max-run` control natural runtime before replacement
+4. `--churn-probability` controls extra random turnover per tick
+5. `--fis-warning-window` controls warning-to-termination gap for mock FIS
 
 ## Communication
 

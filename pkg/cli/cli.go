@@ -40,6 +40,10 @@ func Summary(experiment *types.Experiment) string {
 
 func PrintMonitor(experiment *types.Experiment, events <-chan itn.Event) {
 	fmt.Print(Summary(experiment))
+	PrintEvents(events)
+}
+
+func PrintEvents(events <-chan itn.Event) {
 	for event := range events {
 		fmt.Printf("%s: %s\n", event.Timestamp.Format("2006-01-02T15:04:05"), event.Message)
 	}

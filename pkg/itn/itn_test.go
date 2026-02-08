@@ -273,6 +273,10 @@ func (f *fisMockClient) StartExperiment(ctx context.Context, params *fis.StartEx
 	return &output, nil
 }
 
+func (f *fisMockClient) StopExperiment(ctx context.Context, params *fis.StopExperimentInput, optFns ...func(*fis.Options)) (*fis.StopExperimentOutput, error) {
+	return &fis.StopExperimentOutput{}, nil
+}
+
 func (i *iamMockClient) CreateRole(ctx context.Context, params *iam.CreateRoleInput, optFns ...func(*iam.Options)) (*iam.CreateRoleOutput, error) {
 	if ctx.Value("roleExists") != nil {
 		var alreadyExists *iamtypes.EntityAlreadyExistsException

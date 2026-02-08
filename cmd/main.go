@@ -17,12 +17,18 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/aws/amazon-ec2-spot-interrupter/pkg/cli"
 	"github.com/aws/amazon-ec2-spot-interrupter/pkg/itn"
 	"github.com/aws/amazon-ec2-spot-interrupter/pkg/tui"
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +42,9 @@ var version string
 
 type Options struct {
 	instanceIDs []string
+	filters     []string
+	output      string
+	endpoint    string
 	delay       time.Duration
 	clean       bool
 	version     bool
@@ -54,16 +63,27 @@ func main() {
 				fmt.Println(version)
 				os.Exit(0)
 			}
-			if len(options.instanceIDs) == 0 && !options.interactive {
+			if len(options.instanceIDs) == 0 && len(options.filters) == 0 && !options.interactive {
 				options.interactive = true
 			}
-			ctx := context.Background()
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			output, err := cli.ParseOutputFormat(options.output)
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			endpoint := strings.TrimSpace(options.endpoint)
+			if endpoint == "" {
+				endpoint = strings.TrimSpace(os.Getenv("ENDPOINT"))
+			}
 			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
 			}
-			interrupter := itn.New(cfg)
+			cfg = withMockCredentials(cfg, endpoint)
+			interrupter := itn.NewWithEndpoint(cfg, endpoint)
 			if options.interactive {
 				p := tea.NewProgram(tui.NewModel(ctx, interrupter), tea.WithAltScreen())
 				if err := p.Start(); err != nil {
@@ -72,16 +92,74 @@ func main() {
 				}
 				os.Exit(0)
 			}
-			experiments, events, err := interrupter.InterruptInstanceIDs(context.Background(), options.instanceIDs, options.delay, options.clean)
+			targets, err := cli.ResolveSpotTargets(ctx, interrupter, options.instanceIDs, options.filters, true)
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
 			}
-			if len(experiments) > 0 {
-				cli.PrintMonitor(experiments[0], events)
+			ptrs := make([]*ec2types.Instance, 0, len(targets))
+			for idx := range targets {
+				ptrs = append(ptrs, &targets[idx])
+			}
+			experiments, events, err := interrupter.InterruptInstances(ctx, ptrs, options.delay, options.clean)
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			if output == cli.OutputNone {
+				for _, exp := range experiments {
+					fmt.Print(cli.Summary(exp))
+				}
+				cli.PrintEvents(events)
+				return
+			}
+			collected := cli.CollectEvents(events)
+			report := cli.BuildInterruptionReport(ptrs, collected)
+			if err := cli.PrintReport(output, report); err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
 			}
 		},
 	}
+
+	chaosOpts := cli.ChaosOptions{}
+	chaosCmd := &cobra.Command{
+		Use:   "chaos",
+		Short: "Run randomized Spot interruption chaos non-interactively",
+		Run: func(cmd *cobra.Command, _ []string) {
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			output, err := cli.ParseOutputFormat(options.output)
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			endpoint := strings.TrimSpace(options.endpoint)
+			if endpoint == "" {
+				endpoint = strings.TrimSpace(os.Getenv("ENDPOINT"))
+			}
+			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			cfg = withMockCredentials(cfg, endpoint)
+			interrupter := itn.NewWithEndpoint(cfg, endpoint)
+			chaosOpts.InstanceIDs = options.instanceIDs
+			chaosOpts.Filters = options.filters
+			chaosOpts.Output = output
+			chaosOpts.Delay = options.delay
+			chaosOpts.Clean = options.clean
+			if err := cli.RunChaos(ctx, interrupter, chaosOpts); err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+	chaosCmd.Flags().IntVar(&chaosOpts.MaxAtOnce, "max-at-once", 0, "maximum instances to interrupt per cycle (default: dynamic 1/3 of eligible instances)")
+	chaosCmd.Flags().DurationVar(&chaosOpts.MinWait, "min-wait", 5*time.Minute, "minimum wait between chaos cycles and minimum warm-up time since launch")
+	chaosCmd.Flags().BoolVar(&chaosOpts.Force, "force", false, "skip confirmation prompt")
+
 	installCmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install helper integrations",
@@ -119,13 +197,19 @@ func main() {
 		Use:   "interrupt-node",
 		Short: "Interrupt the EC2 Spot instance matching a node hint",
 		Run: func(cmd *cobra.Command, _ []string) {
-			ctx := context.Background()
+			ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer cancel()
+			endpoint := strings.TrimSpace(options.endpoint)
+			if endpoint == "" {
+				endpoint = strings.TrimSpace(os.Getenv("ENDPOINT"))
+			}
 			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
 			}
-			interrupter := itn.New(cfg)
+			cfg = withMockCredentials(cfg, endpoint)
+			interrupter := itn.NewWithEndpoint(cfg, endpoint)
 			err = cli.InterruptNodeFromK9s(ctx, interrupter, cli.K9sInterruptNodeOptions{
 				NodeHint: k9sNode,
 				Delay:    options.delay,
@@ -142,8 +226,12 @@ func main() {
 
 	rootCmd.AddCommand(installCmd)
 	rootCmd.AddCommand(k9sCmd)
+	rootCmd.AddCommand(chaosCmd)
 
 	rootCmd.PersistentFlags().StringSliceVarP(&options.instanceIDs, "instance-ids", "i", []string{}, "instance IDs to interrupt")
+	rootCmd.PersistentFlags().StringArrayVar(&options.filters, "filter", []string{}, "AWS-style filter selector, e.g. Name=tag:Name,Values=worker-a")
+	rootCmd.PersistentFlags().StringVarP(&options.output, "output", "o", "none", "report output format: none,json,yaml,table,markdown")
+	rootCmd.PersistentFlags().StringVar(&options.endpoint, "endpoint", "", "override AWS API endpoint (also supports ENDPOINT env var)")
 	rootCmd.PersistentFlags().BoolVarP(&options.clean, "clean", "c", true, "clean up the underlying simulations")
 	rootCmd.PersistentFlags().DurationVarP(&options.delay, "delay", "d", time.Second*15, "duration until the interruption notification is sent")
 	rootCmd.PersistentFlags().BoolVarP(&options.version, "version", "v", false, "the version")
@@ -151,4 +239,12 @@ func main() {
 	rootCmd.PersistentFlags().StringVarP(&options.region, "region", "r", "", "the AWS Region (or 'global')")
 	rootCmd.PersistentFlags().StringVarP(&options.profile, "profile", "p", "", "the AWS Profile")
 	rootCmd.Execute()
+}
+
+func withMockCredentials(cfg aws.Config, endpoint string) aws.Config {
+	if strings.TrimSpace(endpoint) == "" {
+		return cfg
+	}
+	cfg.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("mock-access-key", "mock-secret-key", "mock-session-token"))
+	return cfg
 }
