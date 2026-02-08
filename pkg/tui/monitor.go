@@ -57,6 +57,7 @@ type monitor struct {
 	ctx          context.Context
 	itn          *itn.ITN
 	hub          *experimentHub
+	back         tea.Model
 	experimentID string
 	spinner      spinner.Model
 	width        int
@@ -77,7 +78,7 @@ func refreshMonitor() tea.Cmd {
 	})
 }
 
-func NewMonitor(ctx context.Context, itnClient *itn.ITN, hub *experimentHub, experimentID string) monitor {
+func NewMonitor(ctx context.Context, itnClient *itn.ITN, hub *experimentHub, back tea.Model, experimentID string) monitor {
 	sp := spinner.New()
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("206"))
 	sp.Spinner = spinner.Points
@@ -109,6 +110,7 @@ func NewMonitor(ctx context.Context, itnClient *itn.ITN, hub *experimentHub, exp
 		ctx:          ctx,
 		itn:          itnClient,
 		hub:          hub,
+		back:         back,
 		experimentID: experimentID,
 		spinner:      sp,
 		help:         h,
@@ -179,8 +181,10 @@ func (m monitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, m.keys.Back):
-			back := newModelWithHub(m.ctx, m.itn, m.hub)
-			return back, back.Init()
+			if m.back != nil {
+				return m.back, nil
+			}
+			return m, nil
 		case key.Matches(msg, m.keys.Next):
 			next := m.hub.NextID(m.experimentID)
 			if next != "" {

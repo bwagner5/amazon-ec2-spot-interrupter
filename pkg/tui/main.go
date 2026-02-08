@@ -16,7 +16,6 @@ package tui
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +25,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -38,56 +38,96 @@ var (
 )
 
 type listKeyMap struct {
-	Up        key.Binding
-	Down      key.Binding
-	Select    key.Binding
-	SelectAll key.Binding
-	Clear     key.Binding
-	Refresh   key.Binding
-	Monitor   key.Binding
-	Open      key.Binding
-	Quit      key.Binding
+	Up          key.Binding
+	Down        key.Binding
+	Select      key.Binding
+	SelectAll   key.Binding
+	Clear       key.Binding
+	Refresh     key.Binding
+	Search      key.Binding
+	Monitor     key.Binding
+	Global      key.Binding
+	RegionModal key.Binding
+	TagFilter   key.Binding
+	Chaos       key.Binding
+	Open        key.Binding
+	Quit        key.Binding
 }
 
 func (k listKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Select, k.Open, k.Monitor, k.Quit}
+	return []key.Binding{k.Select, k.Open, k.Search, k.TagFilter, k.RegionModal, k.Chaos, k.Quit}
 }
 
 func (k listKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Select, k.SelectAll}, {k.Clear, k.Refresh, k.Monitor, k.Open, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Select, k.SelectAll}, {k.Clear, k.Refresh, k.Search, k.TagFilter, k.Chaos, k.Monitor, k.Global, k.RegionModal, k.Open, k.Quit}}
 }
 
 func defaultListKeys() listKeyMap {
 	return listKeyMap{
-		Up:        key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-		Down:      key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-		Select:    key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
-		SelectAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all running")),
-		Clear:     key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "clear")),
-		Refresh:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-		Monitor:   key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "open experiment")),
-		Open:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "interrupt")),
-		Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+		Up:          key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
+		Down:        key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
+		Select:      key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
+		SelectAll:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all running")),
+		Clear:       key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "clear")),
+		Refresh:     key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "refresh")),
+		Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+		Monitor:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "open experiment")),
+		Global:      key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "query global")),
+		RegionModal: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "region filter")),
+		TagFilter:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag filter")),
+		Chaos:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "chaos mode")),
+		Open:        key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "interrupt")),
+		Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
 
 type model struct {
-	instances    []ec2types.Instance
-	selected     map[string]struct{}
-	ctx          context.Context
-	itn          *itn.ITN
-	initialized  bool
-	spinner      spinner.Model
-	help         help.Model
-	keys         listKeyMap
-	table        table.Model
-	status       string
-	lastRefresh  time.Time
-	loading      bool
-	listingError error
-	width        int
-	height       int
-	hub          *experimentHub
+	instances       []ec2types.Instance
+	selected        map[string]struct{}
+	ctx             context.Context
+	itn             *itn.ITN
+	initialized     bool
+	spinner         spinner.Model
+	help            help.Model
+	keys            listKeyMap
+	table           table.Model
+	status          string
+	lastRefresh     time.Time
+	loading         bool
+	listingError    error
+	width           int
+	height          int
+	hub             *experimentHub
+	searchInput     textinput.Model
+	searching       bool
+	filter          string
+	filteredIdxs    []int
+	eventWidth      int
+	nameWidth       int
+	globalMode      bool
+	activeRegions   []string
+	regionChoices   []string
+	regionCursor    int
+	showRegionModal bool
+	regionModalBusy bool
+	queryCompleted  int
+	queryTotal      int
+	queryingRegions bool
+	showTagModal    bool
+	tagKeyInput     textinput.Model
+	tagValueInput   textinput.Model
+	tagFocus        int
+	tagCursor       int
+	tagSuggestions  []string
+	tagFilterKey    string
+	tagFilterValue  string
+	regionValues    []string
+	chaos           *chaosController
+	showChaosModal  bool
+	chaosMaxInput   textinput.Model
+	chaosWaitInput  textinput.Model
+	chaosFocus      int
+	chaosConfirming bool
 }
 
 type spotInstancesMsg struct {
@@ -96,6 +136,21 @@ type spotInstancesMsg struct {
 }
 
 type retrySpotInstances time.Time
+
+type regionProgressMsg struct {
+	p  itn.RegionQueryProgress
+	ch <-chan itn.RegionQueryProgress
+}
+
+type regionProgressDone struct {
+	ch <-chan itn.RegionQueryProgress
+}
+
+type regionChoicesMsg struct {
+	labels []string
+	values []string
+	err    error
+}
 
 func NewModel(ctx context.Context, itnClient *itn.ITN) model {
 	return newModelWithHub(ctx, itnClient, newExperimentHub())
@@ -114,7 +169,7 @@ func newModelWithHub(ctx context.Context, itnClient *itn.ITN, hub *experimentHub
 			{Title: "STATE", Width: 12},
 			{Title: "AZ", Width: 11},
 			{Title: "TYPE", Width: 13},
-			{Title: "EXP(A/T)", Width: 9},
+			{Title: "EXP", Width: 9},
 			{Title: "PROGRESS", Width: 14},
 			{Title: "EVENT", Width: 34},
 		}),
@@ -129,24 +184,105 @@ func newModelWithHub(ctx context.Context, itnClient *itn.ITN, hub *experimentHub
 	h := help.New()
 	h.ShowAll = false
 
+	search := textinput.New()
+	search.CharLimit = 80
+	search.Prompt = "/ "
+	search.Width = 40
+
+	tagKey := textinput.New()
+	tagKey.Prompt = ""
+	tagKey.CharLimit = 128
+	tagKey.Width = 24
+
+	tagValue := textinput.New()
+	tagValue.Prompt = ""
+	tagValue.CharLimit = 128
+	tagValue.Width = 24
+
+	chaosMax := textinput.New()
+	chaosMax.CharLimit = 10
+	chaosMax.Width = 8
+	chaosWait := textinput.New()
+	chaosWait.CharLimit = 20
+	chaosWait.Width = 12
+
+	global := strings.EqualFold(itnClient.Region(), "global")
+
 	return model{
-		selected: map[string]struct{}{},
-		ctx:      ctx,
-		itn:      itnClient,
-		spinner:  sp,
-		help:     h,
-		keys:     defaultListKeys(),
-		table:    tbl,
-		status:   "Loading Spot instances...",
-		loading:  true,
-		hub:      hub,
+		selected:       map[string]struct{}{},
+		ctx:            ctx,
+		itn:            itnClient,
+		spinner:        sp,
+		help:           h,
+		keys:           defaultListKeys(),
+		table:          tbl,
+		status:         "Loading Spot instances...",
+		loading:        true,
+		hub:            hub,
+		searchInput:    search,
+		nameWidth:      24,
+		eventWidth:     34,
+		globalMode:     global,
+		tagKeyInput:    tagKey,
+		tagValueInput:  tagValue,
+		chaos:          newChaosController(),
+		chaosMaxInput:  chaosMax,
+		chaosWaitInput: chaosWait,
 	}
 }
 
-func loadSpotInstances(ctx context.Context, itnClient *itn.ITN) tea.Cmd {
+func loadSpotInstances(ctx context.Context, itnClient *itn.ITN, global bool, regions []string, progress chan<- itn.RegionQueryProgress) tea.Cmd {
 	return func() tea.Msg {
+		defer func() {
+			if progress != nil {
+				close(progress)
+			}
+		}()
+
+		if global {
+			instances, err := itnClient.SpotInstancesGlobal(ctx, progress)
+			return spotInstancesMsg{instances: instances, err: err}
+		}
+		if len(regions) > 0 {
+			instances, err := itnClient.SpotInstancesInRegions(ctx, regions, progress)
+			return spotInstancesMsg{instances: instances, err: err}
+		}
 		instances, err := itnClient.SpotInstances(ctx)
 		return spotInstancesMsg{instances: instances, err: err}
+	}
+}
+
+func loadRegionChoices(ctx context.Context, itnClient *itn.ITN, instances []ec2types.Instance) tea.Cmd {
+	return func() tea.Msg {
+		regions, err := itnClient.ListRegions(ctx)
+		if err != nil {
+			return regionChoicesMsg{err: err}
+		}
+		counts := map[string]int{}
+		for _, inst := range instances {
+			r := regionFromAZ(instanceAZ(inst))
+			if r == "" || r == "-" {
+				continue
+			}
+			counts[r]++
+		}
+		labels := []string{"GLOBAL (all regions)"}
+		values := []string{"GLOBAL"}
+		for _, r := range regions {
+			labels = append(labels, fmt.Sprintf("%s (%d)", r, counts[r]))
+			values = append(values, r)
+		}
+		return regionChoicesMsg{labels: labels, values: values}
+	}
+}
+
+func listenRegionProgress(ch <-chan itn.RegionQueryProgress) tea.Cmd {
+	return func() tea.Msg {
+		p, ok := <-ch
+		if !ok {
+			return regionProgressDone{ch: ch}
+		}
+		return regionProgressMsg{p: p, ch: ch}
 	}
 }
 
@@ -156,13 +292,30 @@ func scheduleRefresh() tea.Cmd {
 	})
 }
 
+func (m model) startLoadCmd() tea.Cmd {
+	progress := make(chan itn.RegionQueryProgress, 16)
+	if m.globalMode || len(m.activeRegions) > 0 {
+		m.queryTotal = 0
+	} else {
+		m.queryTotal = 1
+	}
+	m.queryCompleted = 0
+	m.queryingRegions = m.globalMode || len(m.activeRegions) > 0
+	return tea.Batch(
+		loadSpotInstances(m.ctx, m.itn, m.globalMode, m.activeRegions, progress),
+		listenRegionProgress(progress),
+	)
+}
+
 func (m model) Init() tea.Cmd {
-	return tea.Batch(spinner.Tick, loadSpotInstances(m.ctx, m.itn), scheduleRefresh(), tea.WindowSize())
+	return tea.Batch(spinner.Tick, m.startLoadCmd(), scheduleRefresh(), tea.WindowSize())
 }
 
 func (m *model) syncRows() {
 	rows := make([]table.Row, 0, len(m.instances))
-	for _, inst := range m.instances {
+	m.filteredIdxs = m.filteredIndices()
+	for _, idx := range m.filteredIdxs {
+		inst := m.instances[idx]
 		id := instanceID(inst)
 		sel := "[ ]"
 		if _, ok := m.selected[id]; ok {
@@ -172,13 +325,13 @@ func (m *model) syncRows() {
 		rows = append(rows, table.Row{
 			sel,
 			id,
-			truncate(instanceName(inst), 24),
+			truncate(instanceName(inst), m.nameWidth),
 			string(inst.State.Name),
 			instanceAZ(inst),
 			string(inst.InstanceType),
 			expStatus,
 			progress,
-			truncate(event, 34),
+			truncate(event, m.eventWidth),
 		})
 	}
 	m.table.SetRows(rows)
@@ -199,113 +352,54 @@ func (m *model) resize() {
 		m.height = 40
 	}
 	helpHeight := lipgloss.Height(m.help.View(m.keys))
-	tableHeight := m.height - helpHeight - 7
+	searchHeight := 0
+	if m.searching || m.filter != "" {
+		searchHeight = 2
+	}
+	tableHeight := m.height - helpHeight - searchHeight - 7
 	if tableHeight < 5 {
 		tableHeight = 5
 	}
 	m.table.SetHeight(tableHeight)
-	m.table.SetWidth(m.width - 4)
+	m.table.SetWidth(m.width - 6)
+	m.applyColumnWidths()
 }
 
-func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.resize()
-	case spotInstancesMsg:
-		m.loading = false
-		m.initialized = true
-		if msg.err != nil {
-			m.listingError = msg.err
-			m.status = fmt.Sprintf("Failed to list Spot instances: %v", msg.err)
-			return m, scheduleRefresh()
-		}
-		m.listingError = nil
-		m.instances = msg.instances
-		sort.Slice(m.instances, func(i, j int) bool {
-			leftID := instanceID(m.instances[i])
-			rightID := instanceID(m.instances[j])
-			leftState := string(m.instances[i].State.Name)
-			rightState := string(m.instances[j].State.Name)
-			if leftState != rightState {
-				return leftState < rightState
-			}
-			return leftID < rightID
-		})
-		m.pruneSelection()
-		m.syncRows()
-		if len(m.instances) == 0 {
-			m.status = "No Spot instances found in this account/region"
-		} else {
-			m.status = fmt.Sprintf("Loaded %d Spot instances", len(m.instances))
-		}
-		m.lastRefresh = time.Now()
-		return m, scheduleRefresh()
-	case retrySpotInstances:
-		m.loading = true
-		return m, loadSpotInstances(m.ctx, m.itn)
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		m.syncRows()
-		return m, cmd
-	case tea.KeyMsg:
-		switch {
-		case key.Matches(msg, m.keys.Quit):
-			return m, tea.Quit
-		case key.Matches(msg, m.keys.Up):
-			if m.table.Cursor() > 0 {
-				m.table.SetCursor(m.table.Cursor() - 1)
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.Down):
-			if m.table.Cursor() < len(m.table.Rows())-1 {
-				m.table.SetCursor(m.table.Cursor() + 1)
-			}
-			return m, nil
-		case key.Matches(msg, m.keys.Select):
-			m.toggleSelectionAtCursor()
-			m.syncRows()
-			return m, nil
-		case key.Matches(msg, m.keys.SelectAll):
-			m.selectAllRunnable()
-			m.syncRows()
-			return m, nil
-		case key.Matches(msg, m.keys.Clear):
-			m.selected = map[string]struct{}{}
-			m.status = "Selection cleared"
-			m.syncRows()
-			return m, nil
-		case key.Matches(msg, m.keys.Refresh):
-			m.loading = true
-			m.status = "Refreshing Spot instance list..."
-			return m, loadSpotInstances(m.ctx, m.itn)
-		case key.Matches(msg, m.keys.Open):
-			selectedInstances := m.selectedInstances()
-			if len(selectedInstances) == 0 {
-				m.status = "Select at least one running Spot instance"
-				return m, nil
-			}
-			opts := NewOptions(m.ctx, m.itn, m.hub, selectedInstances)
-			return opts, opts.Init()
-		case key.Matches(msg, m.keys.Monitor):
-			id := m.hub.LatestID(true)
-			if id == "" {
-				id = m.hub.LatestID(false)
-			}
-			if id == "" {
-				m.status = "No experiments yet. Start one with enter."
-				return m, nil
-			}
-			monitor := NewMonitor(m.ctx, m.itn, m.hub, id)
-			return monitor, monitor.Init()
-		}
+func (m *model) applyColumnWidths() {
+	total := m.width - 8
+	if total < 80 {
+		return
 	}
+	fixed := 5 + 20 + 12 + 11 + 13 + 9 + 14
+	remaining := total - fixed
+	if remaining < 24 {
+		remaining = 24
+	}
+	name := remaining / 3
+	if name < 16 {
+		name = 16
+	}
+	event := remaining - name
+	if event < 20 {
+		event = 20
+	}
+	m.nameWidth = name
+	m.eventWidth = event
+	m.table.SetColumns([]table.Column{
+		{Title: "SEL", Width: 5},
+		{Title: "INSTANCE", Width: 20},
+		{Title: "NAME", Width: m.nameWidth},
+		{Title: "STATE", Width: 12},
+		{Title: "AZ", Width: 11},
+		{Title: "TYPE", Width: 13},
+		{Title: "EXP", Width: 9},
+		{Title: "PROGRESS", Width: 14},
+		{Title: "EVENT", Width: m.eventWidth},
+	})
+}
 
-	var cmd tea.Cmd
-	m.table, cmd = m.table.Update(msg)
-	return m, cmd
+func (m *model) updateRegionChoices() {
+	// Region choices are loaded from AWS region list via the modal command.
 }
 
 func (m *model) pruneSelection() {
@@ -322,10 +416,10 @@ func (m *model) pruneSelection() {
 
 func (m *model) toggleSelectionAtCursor() {
 	rowIdx := m.table.Cursor()
-	if rowIdx < 0 || rowIdx >= len(m.instances) {
+	if rowIdx < 0 || rowIdx >= len(m.filteredIdxs) {
 		return
 	}
-	inst := m.instances[rowIdx]
+	inst := m.instances[m.filteredIdxs[rowIdx]]
 	id := instanceID(inst)
 	if !isRunnable(inst) {
 		m.status = fmt.Sprintf("%s is %s (only running instances can be interrupted)", id, string(inst.State.Name))
@@ -385,6 +479,13 @@ func instanceAZ(i ec2types.Instance) string {
 	return *i.Placement.AvailabilityZone
 }
 
+func regionFromAZ(az string) string {
+	if len(az) < 2 || az == "-" {
+		return az
+	}
+	return az[:len(az)-1]
+}
+
 func isRunnable(i ec2types.Instance) bool {
 	return i.State.Name == ec2types.InstanceStateNameRunning
 }
@@ -397,43 +498,4 @@ func truncate(v string, width int) string {
 		return v[:width]
 	}
 	return v[:width-3] + "..."
-}
-
-func (m model) View() string {
-	if m.width == 0 || m.height == 0 {
-		m.width, m.height = 120, 40
-		m.resize()
-	}
-	if !m.initialized {
-		loading := fmt.Sprintf("Loading Spot instances %s", m.spinner.View())
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, loading)
-	}
-
-	selectedCount := len(m.selectedInstances())
-	runningCount := 0
-	for _, inst := range m.instances {
-		if isRunnable(inst) {
-			runningCount++
-		}
-	}
-	status := m.status
-	if m.loading {
-		status = status + " " + m.spinner.View()
-	}
-	if !m.lastRefresh.IsZero() {
-		status += fmt.Sprintf("  | last refresh %s", m.lastRefresh.Format("15:04:05"))
-	}
-	if m.listingError != nil {
-		status += fmt.Sprintf("  | error: %v", m.listingError)
-	}
-
-	header := titleStyle.Render("EC2 Spot Interrupter") + "\n" +
-		fmt.Sprintf("instances=%d running=%d selected=%d active-experiments=%d\n", len(m.instances), runningCount, selectedCount, m.hub.RunningCount()) +
-		status
-
-	content := frameStyle.Width(m.width - 2).Render(m.table.View())
-	helpView := m.help.View(m.keys)
-
-	ui := strings.Join([]string{header, "", content, helpView}, "\n")
-	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Top, ui)
 }

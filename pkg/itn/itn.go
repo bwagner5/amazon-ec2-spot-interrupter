@@ -20,6 +20,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -76,6 +77,16 @@ type ITN struct {
 	fisClient fisAPI
 	iamClient iamAPI
 	ec2Client ec2API
+}
+
+func (i ITN) Region() string {
+	return i.cfg.Region
+}
+
+type RegionQueryProgress struct {
+	Region    string
+	Completed int
+	Total     int
 }
 
 func New(cfg aws.Config) *ITN {
@@ -155,6 +166,9 @@ func (i ITN) validate(ctx context.Context, instanceIDs []string) error {
 }
 
 func (i ITN) SpotInstances(ctx context.Context) ([]ec2types.Instance, error) {
+	if strings.EqualFold(i.cfg.Region, "global") {
+		return i.SpotInstancesGlobal(ctx, nil)
+	}
 	paginator := ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
 		Filters: []ec2types.Filter{
 			{
@@ -174,6 +188,273 @@ func (i ITN) SpotInstances(ctx context.Context) ([]ec2types.Instance, error) {
 		}
 	}
 	return instances, nil
+}
+
+func (i ITN) SpotInstancesGlobal(ctx context.Context, progress chan<- RegionQueryProgress) ([]ec2types.Instance, error) {
+	regions, err := i.ListRegions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return i.SpotInstancesInRegions(ctx, regions, progress)
+}
+
+func (i ITN) SpotInstancesInRegions(ctx context.Context, regions []string, progress chan<- RegionQueryProgress) ([]ec2types.Instance, error) {
+	if len(regions) == 0 {
+		return nil, nil
+	}
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		out       []ec2types.Instance
+		errs      error
+		completed int
+	)
+	total := len(regions)
+	wg.Add(total)
+	for _, region := range regions {
+		region := region
+		go func() {
+			defer wg.Done()
+			client := i.withRegion(region)
+			instances, err := client.spotInstancesSingleRegion(ctx)
+			mu.Lock()
+			defer mu.Unlock()
+			completed++
+			if progress != nil {
+				progress <- RegionQueryProgress{Region: region, Completed: completed, Total: total}
+			}
+			if err != nil {
+				errs = multierr.Append(errs, fmt.Errorf("%s: %w", region, err))
+				return
+			}
+			out = append(out, instances...)
+		}()
+	}
+	wg.Wait()
+	sort.Slice(out, func(a, b int) bool {
+		ra := regionFromInstance(out[a])
+		rb := regionFromInstance(out[b])
+		if ra != rb {
+			return ra < rb
+		}
+		return instanceIDValue(out[a]) < instanceIDValue(out[b])
+	})
+	return out, errs
+}
+
+func (i ITN) ListRegions(ctx context.Context) ([]string, error) {
+	cfg := i.cfg
+	if cfg.Region == "" || strings.EqualFold(cfg.Region, "global") {
+		cfg.Region = "us-east-1"
+	}
+	ec2Client := ec2.NewFromConfig(cfg)
+	out, err := ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(false)})
+	if err != nil {
+		return nil, err
+	}
+	regions := make([]string, 0, len(out.Regions))
+	for _, r := range out.Regions {
+		if r.RegionName == nil {
+			continue
+		}
+		regions = append(regions, *r.RegionName)
+	}
+	sort.Strings(regions)
+	return regions, nil
+}
+
+func (i ITN) InterruptInstances(ctx context.Context, instances []*ec2types.Instance, delay time.Duration, clean bool) ([]*types.Experiment, <-chan Event, error) {
+	byRegion := map[string][]string{}
+	for _, inst := range instances {
+		if inst == nil || inst.InstanceId == nil {
+			continue
+		}
+		region := regionFromInstance(*inst)
+		if region == "" {
+			region = i.cfg.Region
+		}
+		byRegion[region] = append(byRegion[region], *inst.InstanceId)
+	}
+	return i.interruptByRegion(ctx, byRegion, delay, clean)
+}
+
+func (i ITN) InterruptInstanceIDs(ctx context.Context, instanceIDs []string, delay time.Duration, clean bool) ([]*types.Experiment, <-chan Event, error) {
+	if !strings.EqualFold(i.cfg.Region, "global") {
+		exp, events, err := i.Interrupt(ctx, instanceIDs, delay, clean)
+		if err != nil {
+			return nil, nil, err
+		}
+		return []*types.Experiment{exp}, events, nil
+	}
+	instances, err := i.resolveInstancesByIDGlobal(ctx, instanceIDs)
+	if err != nil {
+		return nil, nil, err
+	}
+	ptrs := make([]*ec2types.Instance, 0, len(instances))
+	for idx := range instances {
+		ptrs = append(ptrs, &instances[idx])
+	}
+	return i.InterruptInstances(ctx, ptrs, delay, clean)
+}
+
+func (i ITN) interruptByRegion(ctx context.Context, byRegion map[string][]string, delay time.Duration, clean bool) ([]*types.Experiment, <-chan Event, error) {
+	if len(byRegion) == 0 {
+		return nil, nil, errors.New("no instances specified")
+	}
+	merged := make(chan Event, 50)
+	experiments := make([]*types.Experiment, 0, len(byRegion))
+	chs := make([]<-chan Event, 0, len(byRegion))
+	for region, ids := range byRegion {
+		regional := i.withRegion(region)
+		exp, ev, err := regional.Interrupt(ctx, ids, delay, clean)
+		if err != nil {
+			return nil, nil, err
+		}
+		experiments = append(experiments, exp)
+		chs = append(chs, ev)
+	}
+	go func() {
+		defer close(merged)
+		var wg sync.WaitGroup
+		wg.Add(len(chs))
+		for idx, ch := range chs {
+			region := regionFromExperiment(experiments[idx])
+			go func(region string, c <-chan Event) {
+				defer wg.Done()
+				for e := range c {
+					e.Message = fmt.Sprintf("[%s] %s", region, e.Message)
+					merged <- e
+				}
+			}(region, ch)
+		}
+		wg.Wait()
+	}()
+	return experiments, merged, nil
+}
+
+func (i ITN) resolveInstancesByIDGlobal(ctx context.Context, instanceIDs []string) ([]ec2types.Instance, error) {
+	regions, err := i.ListRegions(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		found    = map[string]ec2types.Instance{}
+		allErr   error
+		idLookup = map[string]struct{}{}
+	)
+	for _, id := range instanceIDs {
+		idLookup[id] = struct{}{}
+	}
+	wg.Add(len(regions))
+	for _, region := range regions {
+		region := region
+		go func() {
+			defer wg.Done()
+			client := i.withRegion(region)
+			paginator := ec2.NewDescribeInstancesPaginator(client.ec2Client, &ec2.DescribeInstancesInput{
+				Filters: []ec2types.Filter{
+					{Name: aws.String("instance-id"), Values: instanceIDs},
+				},
+			})
+			instances := []ec2types.Instance{}
+			for paginator.HasMorePages() {
+				out, err := paginator.NextPage(ctx)
+				if err != nil {
+					mu.Lock()
+					allErr = multierr.Append(allErr, fmt.Errorf("%s: %w", region, err))
+					mu.Unlock()
+					return
+				}
+				for _, res := range out.Reservations {
+					instances = append(instances, res.Instances...)
+				}
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			for _, inst := range instances {
+				id := instanceIDValue(inst)
+				if id == "" {
+					continue
+				}
+				found[id] = inst
+			}
+		}()
+	}
+	wg.Wait()
+	if allErr != nil {
+		return nil, allErr
+	}
+	missing := []string{}
+	out := []ec2types.Instance{}
+	for _, id := range instanceIDs {
+		inst, ok := found[id]
+		if !ok {
+			missing = append(missing, id)
+			continue
+		}
+		out = append(out, inst)
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("could not locate instances in global region scan: %s", strings.Join(missing, ", "))
+	}
+	return out, nil
+}
+
+func (i ITN) withRegion(region string) *ITN {
+	cfg := i.cfg
+	cfg.Region = region
+	return New(cfg)
+}
+
+func (i ITN) spotInstancesSingleRegion(ctx context.Context) ([]ec2types.Instance, error) {
+	paginator := ec2.NewDescribeInstancesPaginator(i.ec2Client, &ec2.DescribeInstancesInput{
+		Filters: []ec2types.Filter{
+			{Name: aws.String("instance-lifecycle"), Values: []string{string(ec2types.InstanceLifecycleSpot)}},
+		},
+	})
+	out := []ec2types.Instance{}
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, r := range page.Reservations {
+			out = append(out, r.Instances...)
+		}
+	}
+	return out, nil
+}
+
+func regionFromInstance(inst ec2types.Instance) string {
+	if inst.Placement.AvailabilityZone == nil {
+		return ""
+	}
+	az := *inst.Placement.AvailabilityZone
+	if len(az) < 2 {
+		return az
+	}
+	return az[:len(az)-1]
+}
+
+func instanceIDValue(inst ec2types.Instance) string {
+	if inst.InstanceId == nil {
+		return ""
+	}
+	return *inst.InstanceId
+}
+
+func regionFromExperiment(experiment *types.Experiment) string {
+	for _, target := range experiment.Targets {
+		for _, arn := range target.ResourceArns {
+			parts := strings.Split(arn, ":")
+			if len(parts) > 3 && parts[3] != "" {
+				return parts[3]
+			}
+		}
+	}
+	return "unknown-region"
 }
 
 func (i ITN) ResolveInstanceIDFromNodeHint(ctx context.Context, nodeHint string) (string, error) {

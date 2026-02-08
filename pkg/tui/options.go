@@ -29,13 +29,14 @@ type options struct {
 	ctx            context.Context
 	itn            *itn.ITN
 	hub            *experimentHub
+	back           tea.Model
 	textInput      textinput.Model
 	validationMsg  string
 	processingOpts bool
 	errorMsg       string
 }
 
-func NewOptions(ctx context.Context, itn *itn.ITN, hub *experimentHub, instances []*ec2types.Instance) options {
+func NewOptions(ctx context.Context, itn *itn.ITN, hub *experimentHub, back tea.Model, instances []*ec2types.Instance) options {
 	ti := textinput.New()
 	ti.SetValue("15s")
 	ti.Focus()
@@ -45,6 +46,7 @@ func NewOptions(ctx context.Context, itn *itn.ITN, hub *experimentHub, instances
 		ctx:       ctx,
 		itn:       itn,
 		hub:       hub,
+		back:      back,
 		instances: instances,
 		textInput: ti,
 	}
@@ -60,27 +62,33 @@ func (o options) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch msg := msg.(type) {
 	case startInterruptMsg:
-		var instanceIDs []string
-		for _, instance := range o.instances {
-			instanceIDs = append(instanceIDs, *instance.InstanceId)
-		}
 		delay, err := o.validateDelay()
 		if err != nil {
 			return o, cmd
 		}
-		experiment, events, err := o.itn.Interrupt(o.ctx, instanceIDs, delay, true)
+		experiments, events, err := o.itn.InterruptInstances(o.ctx, o.instances, delay, true)
 		if err != nil {
 			o.processingOpts = false
 			o.errorMsg = fmt.Sprintf("❌ %s", err)
 			return o, nil
 		}
-		experimentID := o.hub.Track(experiment, o.instances, events)
-		monitor := NewMonitor(o.ctx, o.itn, o.hub, experimentID)
+		if len(experiments) == 0 {
+			o.processingOpts = false
+			o.errorMsg = "❌ no experiments were created"
+			return o, nil
+		}
+		experimentID := o.hub.Track(experiments[0], o.instances, events)
+		monitor := NewMonitor(o.ctx, o.itn, o.hub, o.back, experimentID)
 		return monitor, monitor.Init()
 	case tea.KeyMsg:
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return o, tea.Quit
+		case "esc", "backspace":
+			if o.back != nil {
+				return o.back, nil
+			}
+			return o, nil
 		case "enter":
 			o.processingOpts = true
 			return o, func() tea.Msg {

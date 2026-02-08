@@ -54,6 +54,9 @@ func main() {
 				fmt.Println(version)
 				os.Exit(0)
 			}
+			if len(options.instanceIDs) == 0 && !options.interactive {
+				options.interactive = true
+			}
 			ctx := context.Background()
 			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
 			if err != nil {
@@ -69,12 +72,14 @@ func main() {
 				}
 				os.Exit(0)
 			}
-			experiment, events, err := interrupter.Interrupt(context.Background(), options.instanceIDs, options.delay, options.clean)
+			experiments, events, err := interrupter.InterruptInstanceIDs(context.Background(), options.instanceIDs, options.delay, options.clean)
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
 			}
-			cli.PrintMonitor(experiment, events)
+			if len(experiments) > 0 {
+				cli.PrintMonitor(experiments[0], events)
+			}
 		},
 	}
 	installCmd := &cobra.Command{
@@ -143,7 +148,7 @@ func main() {
 	rootCmd.PersistentFlags().DurationVarP(&options.delay, "delay", "d", time.Second*15, "duration until the interruption notification is sent")
 	rootCmd.PersistentFlags().BoolVarP(&options.version, "version", "v", false, "the version")
 	rootCmd.PersistentFlags().BoolVar(&options.interactive, "interactive", false, "interactive TUI")
-	rootCmd.PersistentFlags().StringVarP(&options.region, "region", "r", "", "the AWS Region")
+	rootCmd.PersistentFlags().StringVarP(&options.region, "region", "r", "", "the AWS Region (or 'global')")
 	rootCmd.PersistentFlags().StringVarP(&options.profile, "profile", "p", "", "the AWS Profile")
 	rootCmd.Execute()
 }

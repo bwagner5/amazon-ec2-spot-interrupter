@@ -273,8 +273,7 @@ func (h *experimentHub) RowStatus(instanceID string) (string, string, string) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
-	total := 0
-	active := 0
+	ref := "-"
 	progress := "-"
 	lastEvent := "-"
 
@@ -288,11 +287,9 @@ func (h *experimentHub) RowStatus(instanceID string) (string, string, string) {
 			continue
 		}
 
-		total++
-		if !exp.Done {
-			active++
+		if ref == "-" {
+			ref = shortExperimentID(exp.ID)
 		}
-
 		if progress == "-" {
 			progress = progressLabel(exp.Progress[instanceID])
 		}
@@ -301,14 +298,10 @@ func (h *experimentHub) RowStatus(instanceID string) (string, string, string) {
 		}
 	}
 
-	expCell := "-"
-	if total > 0 {
-		expCell = fmt.Sprintf("%d/%d", active, total)
-	}
 	if lastEvent == "" {
 		lastEvent = "-"
 	}
-	return expCell, progress, lastEvent
+	return ref, progress, lastEvent
 }
 
 func latestInstanceEvent(instanceID string, events []itn.Event) string {
@@ -330,6 +323,13 @@ func sanitizeEvent(msg string) string {
 		return "-"
 	}
 	return strings.ReplaceAll(strings.TrimSpace(msg), "\n", " ")
+}
+
+func shortExperimentID(id string) string {
+	if len(id) <= 8 {
+		return id
+	}
+	return id[:8]
 }
 
 func progressLabel(p *instanceProgress) string {
