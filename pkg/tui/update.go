@@ -95,6 +95,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncRows()
 		return m, cmd
 	case tea.KeyMsg:
+		if msg.String() == "ctrl+c" {
+			return m, tea.Quit
+		}
 		if m.showChaosModal {
 			updated, cmd := m.handleChaosModalKey(msg)
 			return updated, cmd
@@ -122,7 +125,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m model) handleChaosModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "backspace":
+	case "esc":
 		m.showChaosModal = false
 		m.chaosConfirming = false
 		m.chaosMaxInput.Blur()
@@ -141,7 +144,7 @@ func (m model) handleChaosModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 
 	if m.chaosConfirming {
 		switch strings.ToLower(msg.String()) {
-		case "y":
+		case "y", "enter":
 			maxN, minWait, err := m.parseChaosInputs()
 			if err != nil {
 				m.status = fmt.Sprintf("Invalid chaos settings: %v", err)
@@ -158,7 +161,7 @@ func (m model) handleChaosModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			}
 			m.chaosConfirming = false
 			return m, nil
-		case "n", "esc", "backspace":
+		case "n", "esc":
 			m.chaosConfirming = false
 			return m, nil
 		}
@@ -196,7 +199,7 @@ func (m model) handleChaosModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "backspace":
+	case "esc":
 		m.showTagModal = false
 		m.tagKeyInput.Blur()
 		m.tagValueInput.Blur()
@@ -216,24 +219,15 @@ func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.tagKeyInput.Focus()
 		m.updateTagSuggestions()
 		return m, nil
-	case "up", "k":
+	case "up":
 		if m.tagCursor > 0 {
 			m.tagCursor--
 		}
 		return m, nil
-	case "down", "j":
+	case "down":
 		if m.tagCursor < len(m.tagSuggestions)-1 {
 			m.tagCursor++
 		}
-		return m, nil
-	case "c":
-		m.tagFilterKey = ""
-		m.tagFilterValue = ""
-		m.tagKeyInput.SetValue("")
-		m.tagValueInput.SetValue("")
-		m.syncRows()
-		m.status = "Tag filter cleared"
-		m.updateTagSuggestions()
 		return m, nil
 	case "enter":
 		if len(m.tagSuggestions) > 0 && m.tagCursor >= 0 && m.tagCursor < len(m.tagSuggestions) {
@@ -243,10 +237,27 @@ func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 				m.tagValueInput.SetValue(m.tagSuggestions[m.tagCursor])
 			}
 		}
-		m.tagFilterKey = strings.TrimSpace(m.tagKeyInput.Value())
-		m.tagFilterValue = strings.TrimSpace(m.tagValueInput.Value())
-		if m.tagFilterKey == "" {
+		enteredKey := strings.TrimSpace(m.tagKeyInput.Value())
+		enteredValue := strings.TrimSpace(m.tagValueInput.Value())
+		if enteredKey == "" {
+			enteredKey = "*"
+		}
+		if enteredValue == "" {
+			enteredValue = "*"
+		}
+		if enteredKey == "*" {
+			enteredValue = "*"
+		}
+		if enteredKey == "*" && enteredValue == "*" {
+			m.tagFilterKey = ""
 			m.tagFilterValue = ""
+		} else {
+			m.tagFilterKey = enteredKey
+			if enteredValue == "*" {
+				m.tagFilterValue = ""
+			} else {
+				m.tagFilterValue = enteredValue
+			}
 		}
 		m.showTagModal = false
 		m.tagKeyInput.Blur()
@@ -274,7 +285,7 @@ func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m model) handleRegionModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "q", "backspace":
+	case "esc", "q":
 		m.showRegionModal = false
 		return m, nil
 	case "up", "k":
@@ -308,7 +319,7 @@ func (m model) handleRegionModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 
 func (m model) handleSearchKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "backspace":
+	case "esc":
 		m.searching = false
 		m.searchInput.Blur()
 		return m, nil
@@ -346,7 +357,7 @@ func (m model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.syncRows()
 		return m, nil
 	case key.Matches(msg, m.keys.SelectAll):
-		m.selectAllRunnable()
+		m.toggleSelectAllVisible()
 		m.syncRows()
 		return m, nil
 	case key.Matches(msg, m.keys.Clear):
@@ -383,8 +394,16 @@ func (m model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.showTagModal = true
 		m.tagFocus = 0
 		m.tagCursor = 0
-		m.tagKeyInput.SetValue(m.tagFilterKey)
-		m.tagValueInput.SetValue(m.tagFilterValue)
+		keyValue := m.tagFilterKey
+		valueValue := m.tagFilterValue
+		if strings.TrimSpace(keyValue) == "" {
+			keyValue = "*"
+		}
+		if strings.TrimSpace(valueValue) == "" {
+			valueValue = "*"
+		}
+		m.tagKeyInput.SetValue(keyValue)
+		m.tagValueInput.SetValue(valueValue)
 		m.tagKeyInput.Focus()
 		m.tagValueInput.Blur()
 		m.updateTagSuggestions()

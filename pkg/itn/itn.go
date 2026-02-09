@@ -317,7 +317,7 @@ func (i ITN) SpotInstancesInRegions(ctx context.Context, regions []string, progr
 }
 
 func (i ITN) ListRegions(ctx context.Context) ([]string, error) {
-	out, err := i.ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(false)})
+	out, err := i.ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(true)})
 	if err != nil {
 		return nil, err
 	}
@@ -735,6 +735,11 @@ func (i ITN) stopExperiment(ctx context.Context, experimentID string) error {
 	}
 	_, err := i.fisClient.StopExperiment(ctx, &fis.StopExperimentInput{Id: aws.String(experimentID)})
 	return err
+}
+
+// StopExperiment requests FIS to stop a running experiment.
+func (i ITN) StopExperiment(ctx context.Context, experimentID string) error {
+	return i.stopExperiment(ctx, experimentID)
 }
 
 func (i ITN) isSpotActionInitiated(status types.ExperimentStatus) bool {

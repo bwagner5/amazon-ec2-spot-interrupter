@@ -23,13 +23,24 @@ import (
 func (m *model) updateTagSuggestions() {
 	if m.tagFocus == 0 {
 		typed := strings.ToLower(strings.TrimSpace(m.tagKeyInput.Value()))
+		if typed == "*" {
+			typed = ""
+		}
 		keys := m.tagKeysFromRunning()
-		m.tagSuggestions = filterContains(keys, typed)
+		m.tagSuggestions = filterContains(withWildcard(keys), typed)
 	} else {
 		keyName := strings.TrimSpace(m.tagKeyInput.Value())
 		typed := strings.ToLower(strings.TrimSpace(m.tagValueInput.Value()))
-		values := m.tagValuesForKeyFromRunning(keyName)
-		m.tagSuggestions = filterContains(values, typed)
+		if typed == "*" {
+			typed = ""
+		}
+		var values []string
+		if keyName == "*" || keyName == "" {
+			values = m.tagValuesFromRunning()
+		} else {
+			values = m.tagValuesForKeyFromRunning(keyName)
+		}
+		m.tagSuggestions = filterContains(withWildcard(values), typed)
 	}
 	if m.tagCursor >= len(m.tagSuggestions) {
 		m.tagCursor = len(m.tagSuggestions) - 1
@@ -84,6 +95,27 @@ func (m model) tagValuesForKeyFromRunning(key string) []string {
 	return out
 }
 
+func (m model) tagValuesFromRunning() []string {
+	set := map[string]struct{}{}
+	for _, inst := range m.instances {
+		if !isRunnable(inst) {
+			continue
+		}
+		for _, t := range inst.Tags {
+			if t.Value == nil || *t.Value == "" {
+				continue
+			}
+			set[*t.Value] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(set))
+	for v := range set {
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
+}
+
 func filterContains(items []string, q string) []string {
 	if q == "" {
 		return items
@@ -97,17 +129,28 @@ func filterContains(items []string, q string) []string {
 	return out
 }
 
+func withWildcard(items []string) []string {
+	out := []string{"*"}
+	for _, item := range items {
+		if item == "*" {
+			continue
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
 func matchesTagFilter(inst ec2types.Instance, key string, value string) bool {
 	key = strings.TrimSpace(key)
 	value = strings.TrimSpace(value)
-	if key == "" {
+	if key == "" || key == "*" {
 		return true
 	}
 	for _, t := range inst.Tags {
 		if t.Key == nil || *t.Key != key {
 			continue
 		}
-		if value == "" {
+		if value == "" || value == "*" {
 			return true
 		}
 		if t.Value != nil && *t.Value == value {

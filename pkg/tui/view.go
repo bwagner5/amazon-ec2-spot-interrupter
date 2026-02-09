@@ -23,6 +23,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+var chaosWarningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
 		m.width, m.height = 120, 40
@@ -131,18 +133,18 @@ func (m model) searchView() string {
 func (m model) footerView() string {
 	switch {
 	case m.showTagModal:
-		return "Tag filter: enter apply | c clear | tab/right next | shift+tab/left previous | esc/backspace close"
+		return "Tag filter: enter apply | tab/right next | shift+tab/left previous | up/down suggestions | use *=no filter | esc close"
 	case m.showRegionModal:
-		return "Region scope: enter apply | up/down move | esc/backspace close"
+		return "Region scope: enter apply | up/down move | esc close"
 	case m.showChaosModal:
 		snapshot := m.chaos.Snapshot()
 		if snapshot.Running {
-			return "Chaos mode: s stop | esc/backspace close"
+			return "Chaos mode: s stop | esc close"
 		}
 		if m.chaosConfirming {
-			return "Chaos confirm: y start | n cancel"
+			return "Chaos confirm: enter/y start | n cancel"
 		}
-		return "Chaos config: enter continue | tab/shift+tab switch | esc/backspace close"
+		return "Chaos config: enter continue | tab/shift+tab switch | esc close"
 	default:
 		return m.help.View(m.keys)
 	}
@@ -162,7 +164,7 @@ func (m model) regionModalView() string {
 	if len(m.regionChoices) == 0 {
 		return frameStyle.Width(width).Render("No regions available")
 	}
-	lines := []string{"Region Scope", "enter apply | esc/backspace close", ""}
+	lines := []string{"Region Scope", "enter apply | esc close", ""}
 	for i, r := range m.regionChoices {
 		prefix := "  "
 		if i == m.regionCursor {
@@ -256,16 +258,17 @@ func (m model) chaosModalView() string {
 		if snapshot.Last != "" {
 			lines = append(lines, snapshot.Last)
 		}
-		lines = append(lines, "", "Press 's' to stop chaos | esc/backspace close")
+		lines = append(lines, "", "Press 's' to stop chaos | esc close")
 		return frameStyle.Width(width).Render(strings.Join(lines, "\n"))
 	}
 
 	lines = append(lines, fmt.Sprintf("[Max instances] %s    [Min wait] %s", m.chaosMaxInput.View(), m.chaosWaitInput.View()))
 	lines = append(lines, "Behavior: random batch size between half-max and max, random wait between min and 2x min.")
 	if m.chaosConfirming {
-		lines = append(lines, "", "Confirm start randomized chaos? (y/n)")
+		lines = append(lines, "", chaosWarningStyle.Render("Confirm start randomized chaos? (enter/y to start, n to cancel)"))
+		lines = append(lines, chaosWarningStyle.Render("Note: current selection is ignored; chaos uses live scope, tag filter, and search filter."))
 	} else {
-		lines = append(lines, "", "enter continue | tab/shift+tab switch field | esc/backspace close")
+		lines = append(lines, "", "enter continue | tab/shift+tab switch field | esc close")
 	}
 	return frameStyle.Width(width).Render(strings.Join(lines, "\n"))
 }

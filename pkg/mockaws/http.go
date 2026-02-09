@@ -2,6 +2,8 @@ package mockaws
 
 import (
 	"encoding/json"
+	"encoding/xml"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -26,12 +28,69 @@ func (s *Server) Handler() http.Handler {
 }
 
 func (s *Server) routes() {
+	s.mux.HandleFunc("/", s.handleEC2QueryAPI)
 	s.mux.HandleFunc("/healthz", s.handleHealth)
 	s.mux.HandleFunc("/api/ec2/regions", s.handleRegions)
 	s.mux.HandleFunc("/api/ec2/instances", s.handleInstances)
 	s.mux.HandleFunc("/api/iam/role", s.handleRole)
 	s.mux.HandleFunc("/api/fis/experiments", s.handleExperiments)
 	s.mux.HandleFunc("/api/fis/experiments/", s.handleExperimentByID)
+}
+
+func (s *Server) handleEC2QueryAPI(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path != "/" {
+		http.NotFound(w, r)
+		return
+	}
+	action := strings.TrimSpace(r.URL.Query().Get("Action"))
+	if action == "" {
+		_ = r.ParseForm()
+		action = strings.TrimSpace(r.Form.Get("Action"))
+	}
+	switch action {
+	case "DescribeRegions":
+		s.handleDescribeRegionsXML(w)
+		return
+	default:
+		http.NotFound(w, r)
+		return
+	}
+}
+
+type describeRegionsResponse struct {
+	XMLName   xml.Name          `xml:"DescribeRegionsResponse"`
+	Xmlns     string            `xml:"xmlns,attr"`
+	RequestID string            `xml:"requestId"`
+	RegionSet describeRegionSet `xml:"regionInfo"`
+}
+
+type describeRegionSet struct {
+	Items []describeRegionItem `xml:"item"`
+}
+
+type describeRegionItem struct {
+	RegionName string `xml:"regionName"`
+	Endpoint   string `xml:"regionEndpoint"`
+}
+
+func (s *Server) handleDescribeRegionsXML(w http.ResponseWriter) {
+	regions := s.sim.ListRegions()
+	items := make([]describeRegionItem, 0, len(regions))
+	for _, region := range regions {
+		items = append(items, describeRegionItem{
+			RegionName: region,
+			Endpoint:   fmt.Sprintf("ec2.%s.amazonaws.com", region),
+		})
+	}
+	payload := describeRegionsResponse{
+		Xmlns:     "http://ec2.amazonaws.com/doc/2016-11-15/",
+		RequestID: fmt.Sprintf("mock-%d", time.Now().UnixNano()),
+		RegionSet: describeRegionSet{Items: items},
+	}
+	w.Header().Set("Content-Type", "text/xml; charset=UTF-8")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write([]byte(xml.Header))
+	_ = xml.NewEncoder(w).Encode(payload)
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {

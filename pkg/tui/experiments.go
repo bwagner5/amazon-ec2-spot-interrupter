@@ -178,6 +178,90 @@ func (h *experimentHub) RunningCount() int {
 	return count
 }
 
+func (h *experimentHub) CompletedCount() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	count := 0
+	for _, id := range h.order {
+		exp := h.experiments[id]
+		if exp != nil && exp.Done {
+			count++
+		}
+	}
+	return count
+}
+
+func (h *experimentHub) IDsByDone(done bool) []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	out := []string{}
+	for _, id := range h.order {
+		exp := h.experiments[id]
+		if exp == nil {
+			continue
+		}
+		if exp.Done != done {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func (h *experimentHub) PositionInCohort(current string, done bool) (int, int) {
+	ids := h.IDsByDone(done)
+	total := len(ids)
+	if total == 0 {
+		return 0, 0
+	}
+	for idx, id := range ids {
+		if id == current {
+			return idx + 1, total
+		}
+	}
+	return 1, total
+}
+
+func (h *experimentHub) NextIDInCohort(current string, done bool) string {
+	ids := h.IDsByDone(done)
+	if len(ids) == 0 {
+		return ""
+	}
+	index := -1
+	for i, id := range ids {
+		if id == current {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return ids[len(ids)-1]
+	}
+	return ids[(index+1)%len(ids)]
+}
+
+func (h *experimentHub) PrevIDInCohort(current string, done bool) string {
+	ids := h.IDsByDone(done)
+	if len(ids) == 0 {
+		return ""
+	}
+	index := -1
+	for i, id := range ids {
+		if id == current {
+			index = i
+			break
+		}
+	}
+	if index == -1 {
+		return ids[len(ids)-1]
+	}
+	next := index - 1
+	if next < 0 {
+		next = len(ids) - 1
+	}
+	return ids[next]
+}
+
 func (h *experimentHub) LatestID(runningOnly bool) string {
 	h.mu.RLock()
 	defer h.mu.RUnlock()

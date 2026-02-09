@@ -44,6 +44,7 @@ type Instance struct {
 	Tags       map[string]string `json:"tags"`
 
 	terminateAt time.Time
+	gcAt        time.Time
 }
 
 type Experiment struct {
@@ -78,6 +79,15 @@ type Simulator struct {
 	events      map[string][]Event
 	roleARN     string
 	stopped     chan struct{}
+}
+
+var defaultRegionCatalog = []string{
+	"af-south-1", "ap-east-1", "ap-east-2", "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
+	"ap-south-1", "ap-south-2", "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
+	"ap-southeast-5", "ap-southeast-7", "ca-central-1", "ca-west-1", "eu-central-1", "eu-central-2",
+	"eu-north-1", "eu-south-1", "eu-south-2", "eu-west-1", "eu-west-2", "eu-west-3",
+	"il-central-1", "me-central-1", "me-south-1", "mx-central-1", "sa-east-1",
+	"us-east-1", "us-east-2", "us-west-1", "us-west-2",
 }
 
 func DefaultConfig(scale ScaleProfile) Config {
@@ -164,16 +174,30 @@ func (s *Simulator) tick(now time.Time) {
 
 	// Natural churn and replacement.
 	for id, inst := range s.instances {
+		if inst.State == "terminated" {
+			if !inst.gcAt.IsZero() && now.After(inst.gcAt) {
+				delete(s.instances, id)
+			}
+			continue
+		}
 		if inst.State != "running" {
 			continue
 		}
 		if now.After(inst.terminateAt) || s.rng.Float64() < s.cfg.ChurnProbability {
 			inst.State = "terminated"
-			delete(s.instances, id)
+			inst.gcAt = now.Add(10 * time.Minute)
 		}
 	}
-	for len(s.instances) < s.cfg.InstanceCount {
+
+	runningCount := 0
+	for _, inst := range s.instances {
+		if inst.State == "running" {
+			runningCount++
+		}
+	}
+	for runningCount < s.cfg.InstanceCount {
 		s.spawnLocked()
+		runningCount++
 	}
 
 	// Experiment progression.
@@ -203,7 +227,7 @@ func (s *Simulator) tick(now time.Time) {
 			for _, id := range exp.InstanceID {
 				if inst, ok := s.instances[id]; ok {
 					inst.State = "terminated"
-					delete(s.instances, id)
+					inst.gcAt = now.Add(10 * time.Minute)
 				}
 			}
 			exp.State = "completed"
@@ -257,7 +281,30 @@ func randHex(rng *rand.Rand, bytesLen int) string {
 func (s *Simulator) ListRegions() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	out := append([]string{}, s.cfg.Regions...)
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(defaultRegionCatalog)+len(s.cfg.Regions))
+	for _, r := range defaultRegionCatalog {
+		rr := strings.TrimSpace(r)
+		if rr == "" {
+			continue
+		}
+		if _, ok := seen[rr]; ok {
+			continue
+		}
+		seen[rr] = struct{}{}
+		out = append(out, rr)
+	}
+	for _, r := range s.cfg.Regions {
+		rr := strings.TrimSpace(r)
+		if rr == "" {
+			continue
+		}
+		if _, ok := seen[rr]; ok {
+			continue
+		}
+		seen[rr] = struct{}{}
+		out = append(out, rr)
+	}
 	sort.Strings(out)
 	return out
 }

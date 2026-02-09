@@ -16,6 +16,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,22 +34,24 @@ type monitorKeyMap struct {
 	Back key.Binding
 	Next key.Binding
 	Prev key.Binding
+	Stop key.Binding
 	Quit key.Binding
 }
 
 func (k monitorKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Back, k.Next, k.Prev, k.Quit}
+	return []key.Binding{k.Back, k.Next, k.Prev, k.Stop, k.Quit}
 }
 
 func (k monitorKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Back, k.Next, k.Prev, k.Quit}}
+	return [][]key.Binding{{k.Back, k.Next, k.Prev, k.Stop, k.Quit}}
 }
 
 func defaultMonitorKeys() monitorKeyMap {
 	return monitorKeyMap{
-		Back: key.NewBinding(key.WithKeys("b", "esc", "backspace"), key.WithHelp("b/⌫", "back to instances")),
-		Next: key.NewBinding(key.WithKeys("]", "n"), key.WithHelp("]/n", "next experiment")),
-		Prev: key.NewBinding(key.WithKeys("[", "p"), key.WithHelp("[/p", "prev experiment")),
+		Back: key.NewBinding(key.WithKeys("b", "esc"), key.WithHelp("b/esc", "back to instances")),
+		Next: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "next experiment")),
+		Prev: key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "prev experiment")),
+		Stop: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "stop experiment")),
 		Quit: key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	}
 }
@@ -68,6 +71,7 @@ type monitor struct {
 	logs         viewport.Model
 	snapshot     trackedExperiment
 	haveData     bool
+	status       string
 }
 
 type refreshMonitorMsg time.Time
@@ -186,7 +190,14 @@ func (m monitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case key.Matches(msg, m.keys.Next):
-			next := m.hub.NextID(m.experimentID)
+			done := false
+			if m.haveData {
+				done = m.snapshot.Done
+			}
+			next := m.hub.NextIDInCohort(m.experimentID, done)
+			if next == "" {
+				next = m.hub.NextID(m.experimentID)
+			}
 			if next != "" {
 				m.experimentID = next
 				m.pullSnapshot()
@@ -195,13 +206,38 @@ func (m monitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case key.Matches(msg, m.keys.Prev):
-			prev := m.hub.PrevID(m.experimentID)
+			done := false
+			if m.haveData {
+				done = m.snapshot.Done
+			}
+			prev := m.hub.PrevIDInCohort(m.experimentID, done)
+			if prev == "" {
+				prev = m.hub.PrevID(m.experimentID)
+			}
 			if prev != "" {
 				m.experimentID = prev
 				m.pullSnapshot()
 				m.syncRows()
 				m.syncLogs()
 			}
+			return m, nil
+		case key.Matches(msg, m.keys.Stop):
+			if !m.haveData {
+				m.status = "Experiment data not available"
+				return m, nil
+			}
+			if m.snapshot.Done {
+				m.status = "Experiment already completed"
+				return m, nil
+			}
+			if err := m.itn.StopExperiment(m.ctx, m.experimentID); err != nil {
+				m.status = fmt.Sprintf("Failed to stop experiment: %v", err)
+			} else {
+				m.status = fmt.Sprintf("Stopping experiment %s...", m.experimentID)
+			}
+			m.pullSnapshot()
+			m.syncRows()
+			m.syncLogs()
 			return m, nil
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -245,8 +281,15 @@ func (m *monitor) syncLogs() {
 		m.logs.SetContent(strings.Join(lines, "\n"))
 		return
 	}
+	seen := map[string]struct{}{}
 	for _, e := range m.snapshot.EventLog {
-		lines = append(lines, fmt.Sprintf("%s  %s", e.Timestamp.Format("15:04:05"), e.Message))
+		instanceRef, instanceKey := m.eventInstanceRef(e)
+		dedupeKey := fmt.Sprintf("%s|%s|%s", e.Stage, instanceKey, strings.TrimSpace(e.Message))
+		if _, ok := seen[dedupeKey]; ok {
+			continue
+		}
+		seen[dedupeKey] = struct{}{}
+		lines = append(lines, fmt.Sprintf("%s  [%s] %s", e.Timestamp.Format("15:04:05"), instanceRef, e.Message))
 	}
 	if len(lines) == 0 {
 		lines = append(lines, "Waiting for events...")
@@ -258,6 +301,30 @@ func (m *monitor) syncLogs() {
 	m.logs.GotoBottom()
 }
 
+func (m monitor) eventInstanceRef(e itn.Event) (string, string) {
+	if len(e.InstanceStates) == 0 {
+		return "all", "all"
+	}
+	ids := make([]string, 0, len(e.InstanceStates))
+	for id := range e.InstanceStates {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if len(ids) == len(m.snapshot.OrderedIDs) && len(ids) > 0 {
+		all := true
+		for idx := range ids {
+			if ids[idx] != m.snapshot.OrderedIDs[idx] {
+				all = false
+				break
+			}
+		}
+		if all {
+			return "all", "all"
+		}
+	}
+	return strings.Join(ids, ","), strings.Join(ids, ",")
+}
+
 func (m monitor) View() string {
 	if m.width == 0 || m.height == 0 {
 		m.width, m.height = 120, 40
@@ -265,12 +332,22 @@ func (m monitor) View() string {
 	}
 	header := titleStyle.Render("EC2 Spot Interrupter") + "\n"
 	if m.haveData {
-		header += fmt.Sprintf("watching experiment=%s selected=%d active-experiments=%d", m.snapshot.ID, len(m.snapshot.OrderedIDs), m.hub.RunningCount())
+		completedCount := m.hub.CompletedCount()
+		pos, total := m.hub.PositionInCohort(m.experimentID, m.snapshot.Done)
+		if m.snapshot.Done {
+			header += fmt.Sprintf("completed experiments=%d  viewing=%d/%d", completedCount, pos, total)
+		} else {
+			header += fmt.Sprintf("active experiments=%d  viewing=%d/%d  completed experiments=%d", m.hub.RunningCount(), pos, total, completedCount)
+		}
+		header += fmt.Sprintf("\nwatching experiment=%s selected=%d", m.snapshot.ID, len(m.snapshot.OrderedIDs))
 		if !m.snapshot.Done {
 			header += "  " + m.spinner.View()
 		}
 	} else {
 		header += fmt.Sprintf("watching experiment=%s", m.experimentID)
+	}
+	if strings.TrimSpace(m.status) != "" {
+		header += "\n" + m.status
 	}
 
 	tablePanel := frameStyle.Width(m.width - 2).Render(m.table.View())

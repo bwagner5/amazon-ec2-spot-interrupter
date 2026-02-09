@@ -200,6 +200,18 @@ Useful tuning flags:
 4. `--churn-probability` controls extra random turnover per tick
 5. `--fis-warning-window` controls warning-to-termination gap for mock FIS
 
+## TUI Demo Recording (VHS)
+
+Generate a demo GIF that shows:
+1. a simple interruption
+2. chaos mode with a tag filter
+
+```bash
+./demo/record-tui-demo.sh
+```
+
+This uses the local mock simulator in the background, but the recorded terminal output only shows normal `ec2-spot-interrupter` usage.
+
 ## Communication
 
 If you've run into a bug or have a new feature request, please open an [issue](https://github.com/aws/amazon-ec2-spot-interrupter/issues/new).

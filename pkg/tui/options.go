@@ -84,7 +84,7 @@ func (o options) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return o, tea.Quit
-		case "esc", "backspace":
+		case "esc":
 			if o.back != nil {
 				return o.back, nil
 			}

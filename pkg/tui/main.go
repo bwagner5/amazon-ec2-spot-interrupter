@@ -16,6 +16,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -55,7 +56,7 @@ type listKeyMap struct {
 }
 
 func (k listKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Select, k.Open, k.Search, k.TagFilter, k.RegionModal, k.Chaos, k.Quit}
+	return []key.Binding{k.Select, k.SelectAll, k.Open, k.Search, k.TagFilter, k.RegionModal, k.Chaos, k.Quit}
 }
 
 func (k listKeyMap) FullHelp() [][]key.Binding {
@@ -67,7 +68,7 @@ func defaultListKeys() listKeyMap {
 		Up:          key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
 		Down:        key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
 		Select:      key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
-		SelectAll:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all running")),
+		SelectAll:   key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all visible")),
 		Clear:       key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "clear")),
 		Refresh:     key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "refresh")),
 		Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
@@ -266,6 +267,14 @@ func loadRegionChoices(ctx context.Context, itnClient *itn.ITN, instances []ec2t
 			}
 			counts[r]++
 		}
+		sort.Slice(regions, func(i, j int) bool {
+			left := counts[regions[i]]
+			right := counts[regions[j]]
+			if left != right {
+				return left > right
+			}
+			return regions[i] < regions[j]
+		})
 		labels := []string{"GLOBAL (all regions)"}
 		values := []string{"GLOBAL"}
 		for _, r := range regions {
@@ -342,6 +351,15 @@ func (m *model) syncRows() {
 	if m.table.Cursor() >= len(rows) {
 		m.table.SetCursor(len(rows) - 1)
 	}
+	m.updateSelectAllHelp()
+}
+
+func (m *model) updateSelectAllHelp() {
+	helpLabel := "select all visible"
+	if m.allVisibleSelected() {
+		helpLabel = "deselect all visible"
+	}
+	m.keys.SelectAll = key.NewBinding(key.WithKeys("a"), key.WithHelp("a", helpLabel))
 }
 
 func (m *model) resize() {
@@ -434,15 +452,47 @@ func (m *model) toggleSelectionAtCursor() {
 	m.status = fmt.Sprintf("Selected %s", id)
 }
 
-func (m *model) selectAllRunnable() {
+func (m *model) selectAllVisible() {
 	count := 0
-	for _, inst := range m.instances {
-		if isRunnable(inst) {
-			m.selected[instanceID(inst)] = struct{}{}
+	for _, idx := range m.filteredIdxs {
+		inst := m.instances[idx]
+		id := instanceID(inst)
+		m.selected[id] = struct{}{}
+		count++
+	}
+	m.status = fmt.Sprintf("Selected %d visible Spot instances", count)
+}
+
+func (m *model) deselectAllVisible() {
+	count := 0
+	for _, idx := range m.filteredIdxs {
+		id := instanceID(m.instances[idx])
+		if _, ok := m.selected[id]; ok {
+			delete(m.selected, id)
 			count++
 		}
 	}
-	m.status = fmt.Sprintf("Selected %d running Spot instances", count)
+	m.status = fmt.Sprintf("Deselected %d visible Spot instances", count)
+}
+
+func (m *model) allVisibleSelected() bool {
+	if len(m.filteredIdxs) == 0 {
+		return false
+	}
+	for _, idx := range m.filteredIdxs {
+		if _, ok := m.selected[instanceID(m.instances[idx])]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *model) toggleSelectAllVisible() {
+	if m.allVisibleSelected() {
+		m.deselectAllVisible()
+		return
+	}
+	m.selectAllVisible()
 }
 
 func (m model) selectedInstances() []*ec2types.Instance {
