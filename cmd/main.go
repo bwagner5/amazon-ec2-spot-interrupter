@@ -185,7 +185,7 @@ func main() {
 			fmt.Println("Restart k9s (or reload plugins) and press Shift-I to launch.")
 		},
 	}
-	k9sPluginCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/.k9s)")
+	k9sPluginCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
 	installCmd.AddCommand(k9sPluginCmd)
 
 	k9sCmd := &cobra.Command{

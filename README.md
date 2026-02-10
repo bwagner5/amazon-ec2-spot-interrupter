@@ -25,7 +25,11 @@ Optional: specify a custom k9s config path:
 ec2-spot-interrupter install k9s-plugin --k9s-dir /path/to/.k9s
 ```
 
-This adds an `ec2-spot-interrupter` plugin to `~/.k9s/plugins.yaml` scoped to `nodes`.
+By default, install targets:
+1. macOS: `~/Library/Application Support/k9s/plugins.yaml` (falls back to `~/.k9s/plugins.yaml` if that already exists)
+2. other OSes: `~/.k9s/plugins.yaml`
+
+This appends an `ec2-spot-interrupter` plugin under `plugins:` scoped to `nodes` and preserves existing plugin entries.
 The plugin runs in the background and keeps you on the k9s Node view.
 
 Use it from k9s Node view:
