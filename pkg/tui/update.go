@@ -34,12 +34,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.initialized = true
 		m.queryingRegions = false
-		if msg.err != nil {
-			m.listingError = msg.err
-			m.status = fmt.Sprintf("Failed to list Spot instances: %v", msg.err)
-			return m, scheduleRefresh()
-		}
-		m.listingError = nil
 		m.instances = msg.instances
 		m.updateRegionStats(msg.instances)
 		if m.queryTotal == 0 {
@@ -59,10 +53,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.updateRegionChoices()
 		m.pruneSelection()
 		m.syncRows()
-		if len(m.instances) == 0 {
-			m.status = "No Spot instances found in selected scope"
+		if msg.err != nil {
+			m.listingError = msg.err
+			if len(m.instances) == 0 {
+				m.status = fmt.Sprintf("Failed to list Spot instances: %v", msg.err)
+			} else {
+				m.status = fmt.Sprintf("Loaded %d Spot instances with region errors: %v", len(m.instances), msg.err)
+			}
 		} else {
-			m.status = fmt.Sprintf("Loaded %d Spot instances", len(m.instances))
+			m.listingError = nil
+			if len(m.instances) == 0 {
+				m.status = "No Spot instances found in selected scope"
+			} else {
+				m.status = fmt.Sprintf("Loaded %d Spot instances", len(m.instances))
+			}
 		}
 		m.lastRefresh = time.Now()
 		return m, scheduleRefresh()
