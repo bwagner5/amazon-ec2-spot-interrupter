@@ -83,52 +83,53 @@ func defaultListKeys() listKeyMap {
 }
 
 type model struct {
-	instances       []ec2types.Instance
-	selected        map[string]struct{}
-	ctx             context.Context
-	itn             *itn.ITN
-	initialized     bool
-	spinner         spinner.Model
-	help            help.Model
-	keys            listKeyMap
-	table           table.Model
-	status          string
-	lastRefresh     time.Time
-	loading         bool
-	listingError    error
-	width           int
-	height          int
-	hub             *experimentHub
-	searchInput     textinput.Model
-	searching       bool
-	filter          string
-	filteredIdxs    []int
-	eventWidth      int
-	nameWidth       int
-	globalMode      bool
-	activeRegions   []string
-	regionChoices   []string
-	regionCursor    int
-	showRegionModal bool
-	regionModalBusy bool
-	queryCompleted  int
-	queryTotal      int
-	queryingRegions bool
-	showTagModal    bool
-	tagKeyInput     textinput.Model
-	tagValueInput   textinput.Model
-	tagFocus        int
-	tagCursor       int
-	tagSuggestions  []string
-	tagFilterKey    string
-	tagFilterValue  string
-	regionValues    []string
-	chaos           *chaosController
-	showChaosModal  bool
-	chaosMaxInput   textinput.Model
-	chaosWaitInput  textinput.Model
-	chaosFocus      int
-	chaosConfirming bool
+	instances              []ec2types.Instance
+	selected               map[string]struct{}
+	ctx                    context.Context
+	itn                    *itn.ITN
+	initialized            bool
+	spinner                spinner.Model
+	help                   help.Model
+	keys                   listKeyMap
+	table                  table.Model
+	status                 string
+	lastRefresh            time.Time
+	loading                bool
+	listingError           error
+	width                  int
+	height                 int
+	hub                    *experimentHub
+	searchInput            textinput.Model
+	searching              bool
+	filter                 string
+	filteredIdxs           []int
+	eventWidth             int
+	nameWidth              int
+	globalMode             bool
+	activeRegions          []string
+	regionChoices          []string
+	regionCursor           int
+	showRegionModal        bool
+	regionModalBusy        bool
+	requireRegionSelection bool
+	queryCompleted         int
+	queryTotal             int
+	queryingRegions        bool
+	showTagModal           bool
+	tagKeyInput            textinput.Model
+	tagValueInput          textinput.Model
+	tagFocus               int
+	tagCursor              int
+	tagSuggestions         []string
+	tagFilterKey           string
+	tagFilterValue         string
+	regionValues           []string
+	chaos                  *chaosController
+	showChaosModal         bool
+	chaosMaxInput          textinput.Model
+	chaosWaitInput         textinput.Model
+	chaosFocus             int
+	chaosConfirming        bool
 }
 
 type spotInstancesMsg struct {
@@ -208,27 +209,31 @@ func newModelWithHub(ctx context.Context, itnClient *itn.ITN, hub *experimentHub
 	chaosWait.Width = 12
 
 	global := strings.EqualFold(itnClient.Region(), "global")
+	requireRegionSelection := !global && strings.TrimSpace(itnClient.Region()) == ""
 
 	return model{
-		selected:       map[string]struct{}{},
-		ctx:            ctx,
-		itn:            itnClient,
-		spinner:        sp,
-		help:           h,
-		keys:           defaultListKeys(),
-		table:          tbl,
-		status:         "Loading Spot instances...",
-		loading:        true,
-		hub:            hub,
-		searchInput:    search,
-		nameWidth:      24,
-		eventWidth:     34,
-		globalMode:     global,
-		tagKeyInput:    tagKey,
-		tagValueInput:  tagValue,
-		chaos:          newChaosController(),
-		chaosMaxInput:  chaosMax,
-		chaosWaitInput: chaosWait,
+		selected:               map[string]struct{}{},
+		ctx:                    ctx,
+		itn:                    itnClient,
+		spinner:                sp,
+		help:                   h,
+		keys:                   defaultListKeys(),
+		table:                  tbl,
+		status:                 "Loading Spot instances...",
+		loading:                true,
+		hub:                    hub,
+		searchInput:            search,
+		nameWidth:              24,
+		eventWidth:             34,
+		globalMode:             global,
+		showRegionModal:        requireRegionSelection,
+		regionModalBusy:        requireRegionSelection,
+		requireRegionSelection: requireRegionSelection,
+		tagKeyInput:            tagKey,
+		tagValueInput:          tagValue,
+		chaos:                  newChaosController(),
+		chaosMaxInput:          chaosMax,
+		chaosWaitInput:         chaosWait,
 	}
 }
 
@@ -317,6 +322,11 @@ func (m model) startLoadCmd() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
+	if m.requireRegionSelection {
+		m.loading = false
+		m.status = "Select a region scope to begin"
+		return tea.Batch(spinner.Tick, loadRegionChoices(m.ctx, m.itn, nil), tea.WindowSize())
+	}
 	return tea.Batch(spinner.Tick, m.startLoadCmd(), scheduleRefresh(), tea.WindowSize())
 }
 

@@ -286,6 +286,9 @@ func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 func (m model) handleRegionModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 	switch msg.String() {
 	case "esc", "q":
+		if m.requireRegionSelection {
+			return m, nil
+		}
 		m.showRegionModal = false
 		return m, nil
 	case "up", "k":
@@ -304,6 +307,7 @@ func (m model) handleRegionModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		}
 		choice := m.regionValues[m.regionCursor]
 		m.showRegionModal = false
+		m.requireRegionSelection = false
 		if choice == "GLOBAL" {
 			m.globalMode = true
 			m.activeRegions = nil
