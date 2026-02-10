@@ -220,11 +220,12 @@ func newModelWithHub(ctx context.Context, itnClient *itn.ITN, hub *experimentHub
 		keys:                   defaultListKeys(),
 		table:                  tbl,
 		status:                 "Loading Spot instances...",
-		loading:                true,
+		loading:                !requireRegionSelection,
 		hub:                    hub,
 		searchInput:            search,
 		nameWidth:              24,
 		eventWidth:             34,
+		initialized:            requireRegionSelection,
 		globalMode:             global,
 		showRegionModal:        requireRegionSelection,
 		regionModalBusy:        requireRegionSelection,
@@ -323,8 +324,6 @@ func (m model) startLoadCmd() tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	if m.requireRegionSelection {
-		m.loading = false
-		m.status = "Select a region scope to begin"
 		return tea.Batch(spinner.Tick, loadRegionChoices(m.ctx, m.itn, nil), tea.WindowSize())
 	}
 	return tea.Batch(spinner.Tick, m.startLoadCmd(), scheduleRefresh(), tea.WindowSize())
