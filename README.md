@@ -16,20 +16,23 @@ brew install ec2-spot-interrupter
 Install via the CLI:
 
 ```bash
-ec2-spot-interrupter install k9s-plugin
+ec2-spot-interrupter install-k9s-plugins
 ```
 
 Optional: specify a custom k9s config path:
 
 ```bash
-ec2-spot-interrupter install k9s-plugin --k9s-dir /path/to/.k9s
+ec2-spot-interrupter install-k9s-plugins --k9s-dir /path/to/k9s
 ```
 
 By default, install targets:
-1. macOS: `~/Library/Application Support/k9s/plugins.yaml` (falls back to `~/.k9s/plugins.yaml` if that already exists)
-2. other OSes: `~/.k9s/plugins.yaml`
+1. macOS: `~/Library/Application Support/k9s` (falls back to `~/.k9s` if legacy exists)
+2. other OSes: `~/.k9s`
 
-This appends an `ec2-spot-interrupter` plugin under `plugins:` scoped to `nodes` and preserves existing plugin entries.
+The installer writes a plugin drop-in file:
+`<k9s-config>/plugins/ec2-spot-interrupter/ec2-spot-interrupter.yaml`
+
+This format uses file-based plugin loading (no `plugins:` header and no top-level plugin-name key in the file), so existing `plugins.yaml` is not modified.
 The plugin runs in the background and keeps you on the k9s Node view.
 
 Use it from k9s Node view:

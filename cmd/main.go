@@ -160,22 +160,15 @@ func main() {
 	chaosCmd.Flags().DurationVar(&chaosOpts.MinWait, "min-wait", 5*time.Minute, "minimum wait between chaos cycles and minimum warm-up time since launch")
 	chaosCmd.Flags().BoolVar(&chaosOpts.Force, "force", false, "skip confirmation prompt")
 
-	installCmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install helper integrations",
-	}
 	var k9sDir string
-	k9sPluginCmd := &cobra.Command{
-		Use:   "k9s-plugin",
-		Short: "Install the k9s plugin configuration for ec2-spot-interrupter",
+	installK9sPluginsCmd := &cobra.Command{
+		Use:   "install-k9s-plugins",
+		Short: "Install k9s plugin configuration for ec2-spot-interrupter",
 		Run: func(cmd *cobra.Command, _ []string) {
 			result, err := cli.InstallK9sPlugin(k9sDir)
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
-			}
-			if result.BackupFile != "" {
-				fmt.Printf("🗂️  Backed up existing plugin config to %s\n", result.BackupFile)
 			}
 			if result.Installed {
 				fmt.Printf("✅ Installed k9s plugin in %s\n", result.PluginFile)
@@ -185,8 +178,7 @@ func main() {
 			fmt.Println("Restart k9s (or reload plugins) and press Shift-I to launch.")
 		},
 	}
-	k9sPluginCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
-	installCmd.AddCommand(k9sPluginCmd)
+	installK9sPluginsCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
 
 	k9sCmd := &cobra.Command{
 		Use:   "k9s",
@@ -224,7 +216,7 @@ func main() {
 	interruptNodeCmd.Flags().StringVar(&k9sNode, "node", "", "node hint (node name/FQDN/instance-id)")
 	k9sCmd.AddCommand(interruptNodeCmd)
 
-	rootCmd.AddCommand(installCmd)
+	rootCmd.AddCommand(installK9sPluginsCmd)
 	rootCmd.AddCommand(k9sCmd)
 	rootCmd.AddCommand(chaosCmd)
 

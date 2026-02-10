@@ -19,13 +19,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 const (
 	k9sPluginName = "ec2-spot-interrupter"
-	k9sPluginSpec = `shortCut: Shift-I
+	k9sPluginYAML = `shortCut: Shift-I
 confirm: true
 description: Interrupt selected Spot node via AWS
 scopes:
@@ -55,35 +53,31 @@ func InstallK9sPlugin(k9sDir string) (*InstallK9sResult, error) {
 		}
 	}
 
-	if err := os.MkdirAll(k9sDir, 0o755); err != nil {
-		return nil, fmt.Errorf("failed to create k9s dir: %w", err)
+	pluginDir := filepath.Join(k9sDir, "plugins", k9sPluginName)
+	if err := os.MkdirAll(pluginDir, 0o755); err != nil {
+		return nil, fmt.Errorf("failed to create plugin dir: %w", err)
 	}
-
-	pluginFile := filepath.Join(k9sDir, "plugins.yaml")
+	pluginFile := filepath.Join(pluginDir, k9sPluginName+".yaml")
 	result := &InstallK9sResult{
 		PluginFile: pluginFile,
 	}
 
-	root, err := loadPluginsYAML(pluginFile)
-	if err != nil {
-		return nil, err
-	}
-
-	inserted, err := ensureK9sPlugin(root)
-	if err != nil {
-		return nil, err
-	}
-	if !inserted {
+	existing, err := os.ReadFile(pluginFile)
+	if err == nil {
+		if strings.TrimSpace(string(existing)) == strings.TrimSpace(k9sPluginYAML) {
+			result.Installed = false
+			return result, nil
+		}
+		// Never overwrite an existing plugin file.
 		result.Installed = false
 		return result, nil
 	}
-
-	raw, err := marshalPluginsYAML(root)
-	if err != nil {
-		return nil, err
+	if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("failed to read plugin file: %w", err)
 	}
-	if err := os.WriteFile(pluginFile, raw, 0o644); err != nil {
-		return nil, fmt.Errorf("failed to write plugin config: %w", err)
+
+	if err := os.WriteFile(pluginFile, []byte(strings.TrimRight(k9sPluginYAML, "\n")+"\n"), 0o644); err != nil {
+		return nil, fmt.Errorf("failed to write plugin file: %w", err)
 	}
 	result.Installed = true
 	return result, nil
@@ -108,115 +102,4 @@ func defaultK9sConfigDir() (string, error) {
 func pathExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
-}
-
-func loadPluginsYAML(pluginFile string) (*yaml.Node, error) {
-	var root yaml.Node
-	existing, err := os.ReadFile(pluginFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			root.Kind = yaml.DocumentNode
-			root.Content = []*yaml.Node{
-				{Kind: yaml.MappingNode},
-			}
-			return &root, nil
-		}
-		return nil, fmt.Errorf("failed to read plugin config: %w", err)
-	}
-	if strings.TrimSpace(string(existing)) == "" {
-		root.Kind = yaml.DocumentNode
-		root.Content = []*yaml.Node{
-			{Kind: yaml.MappingNode},
-		}
-		return &root, nil
-	}
-	if err := yaml.Unmarshal(existing, &root); err != nil {
-		return nil, fmt.Errorf("failed to parse plugin config: %w", err)
-	}
-	if root.Kind != yaml.DocumentNode {
-		return nil, fmt.Errorf("unexpected YAML root type in plugin config")
-	}
-	if len(root.Content) == 0 || root.Content[0] == nil {
-		root.Content = []*yaml.Node{
-			{Kind: yaml.MappingNode},
-		}
-	}
-	if root.Content[0].Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected top-level mapping in plugin config")
-	}
-	return &root, nil
-}
-
-func ensureK9sPlugin(root *yaml.Node) (bool, error) {
-	doc := root.Content[0]
-	pluginsNode := upsertMappingValue(doc, "plugins")
-	if pluginsNode.Kind == 0 {
-		pluginsNode.Kind = yaml.MappingNode
-	}
-	if pluginsNode.Kind != yaml.MappingNode {
-		return false, fmt.Errorf("expected 'plugins' to be a mapping in plugin config")
-	}
-
-	if hasMappingKey(pluginsNode, k9sPluginName) {
-		return false, nil
-	}
-
-	specNode, err := decodeMappingNode(k9sPluginSpec)
-	if err != nil {
-		return false, fmt.Errorf("failed to build k9s plugin spec: %w", err)
-	}
-	appendMappingEntry(pluginsNode, k9sPluginName, specNode)
-	return true, nil
-}
-
-func marshalPluginsYAML(root *yaml.Node) ([]byte, error) {
-	raw, err := yaml.Marshal(root)
-	if err != nil {
-		return nil, fmt.Errorf("failed to render plugin config: %w", err)
-	}
-	return raw, nil
-}
-
-func decodeMappingNode(src string) (*yaml.Node, error) {
-	var doc yaml.Node
-	if err := yaml.Unmarshal([]byte(src), &doc); err != nil {
-		return nil, err
-	}
-	if doc.Kind != yaml.DocumentNode || len(doc.Content) == 0 || doc.Content[0] == nil {
-		return nil, fmt.Errorf("invalid mapping YAML")
-	}
-	node := doc.Content[0]
-	if node.Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("expected mapping YAML")
-	}
-	return node, nil
-}
-
-func upsertMappingValue(mapping *yaml.Node, key string) *yaml.Node {
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		k := mapping.Content[i]
-		v := mapping.Content[i+1]
-		if k != nil && k.Kind == yaml.ScalarNode && k.Value == key {
-			return v
-		}
-	}
-	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
-	valNode := &yaml.Node{Kind: yaml.MappingNode}
-	mapping.Content = append(mapping.Content, keyNode, valNode)
-	return valNode
-}
-
-func hasMappingKey(mapping *yaml.Node, key string) bool {
-	for i := 0; i+1 < len(mapping.Content); i += 2 {
-		k := mapping.Content[i]
-		if k != nil && k.Kind == yaml.ScalarNode && k.Value == key {
-			return true
-		}
-	}
-	return false
-}
-
-func appendMappingEntry(mapping *yaml.Node, key string, value *yaml.Node) {
-	keyNode := &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}
-	mapping.Content = append(mapping.Content, keyNode, value)
 }
