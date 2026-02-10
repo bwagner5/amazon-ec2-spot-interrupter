@@ -73,3 +73,65 @@ func TestInstallK9sPluginNoopOnConflictingExistingFile(t *testing.T) {
 		t.Fatalf("expected no-op when plugin file already exists")
 	}
 }
+
+func TestUninstallK9sPluginRemovesPluginFile(t *testing.T) {
+	root := t.TempDir()
+	installed, err := InstallK9sPlugin(root)
+	if err != nil {
+		t.Fatalf("install plugin: %v", err)
+	}
+	if !installed.Installed {
+		t.Fatalf("expected plugin to be installed")
+	}
+
+	result, err := UninstallK9sPlugin(root)
+	if err != nil {
+		t.Fatalf("uninstall plugin: %v", err)
+	}
+	if !result.Removed {
+		t.Fatalf("expected plugin to be removed")
+	}
+	if _, err := os.Stat(installed.PluginFile); !os.IsNotExist(err) {
+		t.Fatalf("expected plugin file to be removed")
+	}
+}
+
+func TestUninstallK9sPluginNoopWhenMissing(t *testing.T) {
+	root := t.TempDir()
+
+	result, err := UninstallK9sPlugin(root)
+	if err != nil {
+		t.Fatalf("uninstall plugin: %v", err)
+	}
+	if result.Removed {
+		t.Fatalf("expected no-op uninstall for missing plugin")
+	}
+}
+
+func TestUninstallK9sPluginKeepsDirIfNotEmpty(t *testing.T) {
+	root := t.TempDir()
+	installed, err := InstallK9sPlugin(root)
+	if err != nil {
+		t.Fatalf("install plugin: %v", err)
+	}
+	if !installed.Installed {
+		t.Fatalf("expected plugin to be installed")
+	}
+
+	pluginDir := filepath.Dir(installed.PluginFile)
+	extra := filepath.Join(pluginDir, "keep.txt")
+	if err := os.WriteFile(extra, []byte("keep"), 0o644); err != nil {
+		t.Fatalf("write extra file: %v", err)
+	}
+
+	result, err := UninstallK9sPlugin(root)
+	if err != nil {
+		t.Fatalf("uninstall plugin: %v", err)
+	}
+	if !result.Removed {
+		t.Fatalf("expected plugin to be removed")
+	}
+	if _, err := os.Stat(extra); err != nil {
+		t.Fatalf("expected extra file to remain: %v", err)
+	}
+}

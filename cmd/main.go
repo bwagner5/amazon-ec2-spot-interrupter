@@ -179,6 +179,23 @@ func main() {
 		},
 	}
 	installK9sPluginsCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
+	uninstallK9sPluginsCmd := &cobra.Command{
+		Use:   "uninstall-k9s-plugins",
+		Short: "Uninstall k9s plugin configuration for ec2-spot-interrupter",
+		Run: func(cmd *cobra.Command, _ []string) {
+			result, err := cli.UninstallK9sPlugin(k9sDir)
+			if err != nil {
+				fmt.Printf("❌ %s\n", err)
+				os.Exit(1)
+			}
+			if result.Removed {
+				fmt.Printf("✅ Removed k9s plugin file %s\n", result.PluginFile)
+			} else {
+				fmt.Printf("ℹ️  k9s plugin file not found in %s\n", result.PluginFile)
+			}
+		},
+	}
+	uninstallK9sPluginsCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
 
 	k9sCmd := &cobra.Command{
 		Use:   "k9s",
@@ -217,6 +234,7 @@ func main() {
 	k9sCmd.AddCommand(interruptNodeCmd)
 
 	rootCmd.AddCommand(installK9sPluginsCmd)
+	rootCmd.AddCommand(uninstallK9sPluginsCmd)
 	rootCmd.AddCommand(k9sCmd)
 	rootCmd.AddCommand(chaosCmd)
 

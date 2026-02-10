@@ -25,6 +25,12 @@ Optional: specify a custom k9s config path:
 ec2-spot-interrupter install-k9s-plugins --k9s-dir /path/to/k9s
 ```
 
+Uninstall:
+
+```bash
+ec2-spot-interrupter uninstall-k9s-plugins
+```
+
 By default, install targets:
 1. macOS: `~/Library/Application Support/k9s` (falls back to `~/.k9s` if legacy exists)
 2. other OSes: `~/.k9s`
@@ -41,7 +47,7 @@ Use it from k9s Node view:
 3. Press `Shift-I`.
 
 What happens:
-1. k9s passes the selected node name as env var `SPOT_INTERRUPTER_NODE`.
+1. k9s passes the selected node name as command flag `--node <name>`.
 2. The CLI resolves that hint to a running Spot EC2 instance using AWS APIs only.
 3. The CLI runs the same interruption flow used by normal non-TUI mode (`Interrupt` + monitor output).
 

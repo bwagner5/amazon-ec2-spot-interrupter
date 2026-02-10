@@ -14,6 +14,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -31,11 +32,11 @@ const (
     - nodes
   command: ec2-spot-interrupter
   background: true
-  env:
-    - SPOT_INTERRUPTER_NODE=$NAME
   args:
     - k9s
     - interrupt-node
+    - --node
+    - $NAME
 `
 )
 
@@ -43,6 +44,11 @@ type InstallK9sResult struct {
 	PluginFile string
 	BackupFile string
 	Installed  bool
+}
+
+type UninstallK9sResult struct {
+	PluginFile string
+	Removed    bool
 }
 
 func InstallK9sPlugin(k9sDir string) (*InstallK9sResult, error) {
@@ -81,6 +87,37 @@ func InstallK9sPlugin(k9sDir string) (*InstallK9sResult, error) {
 		return nil, fmt.Errorf("failed to write plugin file: %w", err)
 	}
 	result.Installed = true
+	return result, nil
+}
+
+func UninstallK9sPlugin(k9sDir string) (*UninstallK9sResult, error) {
+	if k9sDir == "" {
+		var err error
+		k9sDir, err = defaultK9sConfigDir()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	pluginDir := filepath.Join(k9sDir, "plugins", k9sPluginName)
+	pluginFile := filepath.Join(pluginDir, k9sPluginName+".yaml")
+	result := &UninstallK9sResult{
+		PluginFile: pluginFile,
+	}
+
+	if err := os.Remove(pluginFile); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			result.Removed = false
+			return result, nil
+		}
+		return nil, fmt.Errorf("failed to remove plugin file: %w", err)
+	}
+	result.Removed = true
+
+	entries, err := os.ReadDir(pluginDir)
+	if err == nil && len(entries) == 0 {
+		_ = os.Remove(pluginDir)
+	}
 	return result, nil
 }
 

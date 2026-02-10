@@ -33,11 +33,11 @@ func ResolveNodeHint(opts K9sInterruptNodeOptions) (string, error) {
 	if strings.TrimSpace(opts.NodeHint) != "" {
 		return strings.TrimSpace(opts.NodeHint), nil
 	}
-	// k9s plugin will set this env var from selected node name.
+	// Backward compatibility for older plugin configs that passed node via env var.
 	if v := strings.TrimSpace(os.Getenv("SPOT_INTERRUPTER_NODE")); v != "" {
 		return v, nil
 	}
-	return "", fmt.Errorf("node hint not provided (use --node or SPOT_INTERRUPTER_NODE)")
+	return "", fmt.Errorf("node hint not provided (use --node)")
 }
 
 func InterruptNodeFromK9s(ctx context.Context, interrupter *itn.ITN, opts K9sInterruptNodeOptions) error {
