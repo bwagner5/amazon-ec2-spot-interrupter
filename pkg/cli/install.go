@@ -23,18 +23,19 @@ import (
 
 const (
 	k9sPluginName = "ec2-spot-interrupter"
-	k9sPluginYAML = `shortCut: Shift-I
-confirm: true
-description: Interrupt selected Spot node via AWS
-scopes:
-  - nodes
-command: ec2-spot-interrupter
-background: true
-env:
-  - SPOT_INTERRUPTER_NODE=$NAME
-args:
-  - k9s
-  - interrupt-node
+	k9sPluginYAML = `ec2-spot-interrupter:
+  shortCut: Shift-I
+  confirm: true
+  description: Interrupt Spot
+  scopes:
+    - nodes
+  command: ec2-spot-interrupter
+  background: true
+  env:
+    - SPOT_INTERRUPTER_NODE=$NAME
+  args:
+    - k9s
+    - interrupt-node
 `
 )
 

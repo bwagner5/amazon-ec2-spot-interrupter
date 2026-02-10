@@ -32,7 +32,7 @@ By default, install targets:
 The installer writes a plugin drop-in file:
 `<k9s-config>/plugins/ec2-spot-interrupter/ec2-spot-interrupter.yaml`
 
-This format uses file-based plugin loading (no `plugins:` header and no top-level plugin-name key in the file), so existing `plugins.yaml` is not modified.
+This format uses file-based plugin loading (includes the plugin-name key in the drop-in file), so existing `plugins.yaml` is not modified.
 The plugin runs in the background and keeps you on the k9s Node view.
 
 Use it from k9s Node view:
