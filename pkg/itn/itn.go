@@ -317,7 +317,7 @@ func (i ITN) SpotInstancesInRegions(ctx context.Context, regions []string, progr
 }
 
 func (i ITN) ListRegions(ctx context.Context) ([]string, error) {
-	out, err := i.ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{AllRegions: aws.Bool(true)})
+	out, err := i.ec2Client.DescribeRegions(ctx, &ec2.DescribeRegionsInput{})
 	if err != nil {
 		return nil, err
 	}
