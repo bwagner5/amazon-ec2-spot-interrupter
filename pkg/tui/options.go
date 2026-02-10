@@ -86,7 +86,7 @@ func (o options) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return o, tea.Quit
 		case "esc":
 			if o.back != nil {
-				return o.back, nil
+				return resumeInstancesView(o.back)
 			}
 			return o, nil
 		case "enter":

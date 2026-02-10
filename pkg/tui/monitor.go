@@ -186,7 +186,7 @@ func (m monitor) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch {
 		case key.Matches(msg, m.keys.Back):
 			if m.back != nil {
-				return m.back, nil
+				return resumeInstancesView(m.back)
 			}
 			return m, nil
 		case key.Matches(msg, m.keys.Next):

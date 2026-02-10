@@ -56,7 +56,7 @@ type listKeyMap struct {
 }
 
 func (k listKeyMap) ShortHelp() []key.Binding {
-	return []key.Binding{k.Select, k.SelectAll, k.Open, k.Search, k.TagFilter, k.RegionModal, k.Chaos, k.Quit}
+	return []key.Binding{k.Select, k.SelectAll, k.Open, k.Monitor, k.Search, k.TagFilter, k.RegionModal, k.Chaos, k.Quit}
 }
 
 func (k listKeyMap) FullHelp() [][]key.Binding {
@@ -353,6 +353,16 @@ func (m model) Init() tea.Cmd {
 		return tea.Batch(spinner.Tick, loadRegionChoices(m.ctx, m.itn, counts, queried, m.queriedGlobal), tea.WindowSize())
 	}
 	return tea.Batch(spinner.Tick, m.startLoadCmd(), scheduleRefresh(), tea.WindowSize())
+}
+
+func resumeInstancesView(back tea.Model) (tea.Model, tea.Cmd) {
+	list, ok := back.(model)
+	if !ok {
+		return back, nil
+	}
+	list.loading = true
+	list.status = "Refreshing Spot instance list..."
+	return list, tea.Batch(spinner.Tick, list.startLoadCmd(), scheduleRefresh())
 }
 
 func (m model) regionStatsSnapshot() (map[string]int, map[string]struct{}) {
