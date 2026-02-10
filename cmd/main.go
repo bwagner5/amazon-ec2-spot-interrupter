@@ -161,8 +161,8 @@ func main() {
 	chaosCmd.Flags().BoolVar(&chaosOpts.Force, "force", false, "skip confirmation prompt")
 
 	var k9sDir string
-	installK9sPluginsCmd := &cobra.Command{
-		Use:   "install-k9s-plugins",
+	installK9sPluginCmd := &cobra.Command{
+		Use:   "install-k9s-plugin",
 		Short: "Install k9s plugin configuration for ec2-spot-interrupter",
 		Run: func(cmd *cobra.Command, _ []string) {
 			result, err := cli.InstallK9sPlugin(k9sDir)
@@ -175,12 +175,12 @@ func main() {
 			} else {
 				fmt.Printf("ℹ️  k9s plugin already configured in %s\n", result.PluginFile)
 			}
-			fmt.Println("Restart k9s (or reload plugins) and press Shift-I to launch.")
+			fmt.Println("Restart k9s (or reload plugin) and press Shift-I to launch.")
 		},
 	}
-	installK9sPluginsCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
-	uninstallK9sPluginsCmd := &cobra.Command{
-		Use:   "uninstall-k9s-plugins",
+	installK9sPluginCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
+	uninstallK9sPluginCmd := &cobra.Command{
+		Use:   "uninstall-k9s-plugin",
 		Short: "Uninstall k9s plugin configuration for ec2-spot-interrupter",
 		Run: func(cmd *cobra.Command, _ []string) {
 			result, err := cli.UninstallK9sPlugin(k9sDir)
@@ -195,7 +195,7 @@ func main() {
 			}
 		},
 	}
-	uninstallK9sPluginsCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
+	uninstallK9sPluginCmd.Flags().StringVar(&k9sDir, "k9s-dir", "", "path to k9s config directory (default: ~/Library/Application Support/k9s on macOS, ~/.k9s otherwise)")
 
 	k9sCmd := &cobra.Command{
 		Use:   "k9s",
@@ -233,8 +233,8 @@ func main() {
 	interruptNodeCmd.Flags().StringVar(&k9sNode, "node", "", "node hint (node name/FQDN/instance-id)")
 	k9sCmd.AddCommand(interruptNodeCmd)
 
-	rootCmd.AddCommand(installK9sPluginsCmd)
-	rootCmd.AddCommand(uninstallK9sPluginsCmd)
+	rootCmd.AddCommand(installK9sPluginCmd)
+	rootCmd.AddCommand(uninstallK9sPluginCmd)
 	rootCmd.AddCommand(k9sCmd)
 	rootCmd.AddCommand(chaosCmd)
 
