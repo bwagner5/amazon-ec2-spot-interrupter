@@ -41,6 +41,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.listingError = nil
 		m.instances = msg.instances
+		m.updateRegionStats(msg.instances)
 		if m.queryTotal == 0 {
 			m.queryTotal = 1
 		}
@@ -385,7 +386,8 @@ func (m model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.regionModalBusy = true
 		m.regionChoices = nil
 		m.regionValues = nil
-		return m, loadRegionChoices(m.ctx, m.itn, m.instances)
+		counts, queried := m.regionStatsSnapshot()
+		return m, loadRegionChoices(m.ctx, m.itn, counts, queried, m.queriedGlobal)
 	case key.Matches(msg, m.keys.Chaos):
 		m.showChaosModal = true
 		m.chaosConfirming = false

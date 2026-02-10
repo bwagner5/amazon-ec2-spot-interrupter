@@ -107,6 +107,9 @@ type model struct {
 	nameWidth              int
 	globalMode             bool
 	activeRegions          []string
+	regionCounts           map[string]int
+	queriedRegions         map[string]struct{}
+	queriedGlobal          bool
 	regionChoices          []string
 	regionCursor           int
 	showRegionModal        bool
@@ -227,6 +230,8 @@ func newModelWithHub(ctx context.Context, itnClient *itn.ITN, hub *experimentHub
 		eventWidth:             34,
 		initialized:            requireRegionSelection,
 		globalMode:             global,
+		regionCounts:           map[string]int{},
+		queriedRegions:         map[string]struct{}{},
 		showRegionModal:        requireRegionSelection,
 		regionModalBusy:        requireRegionSelection,
 		requireRegionSelection: requireRegionSelection,
@@ -259,32 +264,52 @@ func loadSpotInstances(ctx context.Context, itnClient *itn.ITN, global bool, reg
 	}
 }
 
-func loadRegionChoices(ctx context.Context, itnClient *itn.ITN, instances []ec2types.Instance) tea.Cmd {
+func loadRegionChoices(ctx context.Context, itnClient *itn.ITN, counts map[string]int, queried map[string]struct{}, queriedGlobal bool) tea.Cmd {
 	return func() tea.Msg {
 		regions, err := itnClient.ListRegions(ctx)
 		if err != nil {
 			return regionChoicesMsg{err: err}
 		}
-		counts := map[string]int{}
-		for _, inst := range instances {
-			r := regionFromAZ(instanceAZ(inst))
-			if r == "" || r == "-" {
-				continue
+		isKnown := func(region string) bool {
+			if queriedGlobal {
+				return true
 			}
-			counts[r]++
+			_, ok := queried[region]
+			return ok
 		}
 		sort.Slice(regions, func(i, j int) bool {
-			left := counts[regions[i]]
-			right := counts[regions[j]]
-			if left != right {
-				return left > right
+			li := regionGroupRank(regions[i])
+			lj := regionGroupRank(regions[j])
+			if li != lj {
+				return li < lj
+			}
+			ki := isKnown(regions[i])
+			kj := isKnown(regions[j])
+			if ki != kj {
+				return ki
+			}
+			if ki {
+				left := counts[regions[i]]
+				right := counts[regions[j]]
+				if left != right {
+					return left > right
+				}
 			}
 			return regions[i] < regions[j]
 		})
 		labels := []string{"GLOBAL (all regions)"}
 		values := []string{"GLOBAL"}
 		for _, r := range regions {
-			labels = append(labels, fmt.Sprintf("%s (%d)", r, counts[r]))
+			countLabel := "(?)"
+			if isKnown(r) {
+				countLabel = fmt.Sprintf("(%d)", counts[r])
+			}
+			loc := regionLocation(r)
+			if loc != "" {
+				labels = append(labels, fmt.Sprintf("%-13s %s (%s) %s", regionGroupLabel(r), r, loc, countLabel))
+			} else {
+				labels = append(labels, fmt.Sprintf("%-13s %s %s", regionGroupLabel(r), r, countLabel))
+			}
 			values = append(values, r)
 		}
 		return regionChoicesMsg{labels: labels, values: values}
@@ -324,9 +349,67 @@ func (m model) startLoadCmd() tea.Cmd {
 
 func (m model) Init() tea.Cmd {
 	if m.requireRegionSelection {
-		return tea.Batch(spinner.Tick, loadRegionChoices(m.ctx, m.itn, nil), tea.WindowSize())
+		counts, queried := m.regionStatsSnapshot()
+		return tea.Batch(spinner.Tick, loadRegionChoices(m.ctx, m.itn, counts, queried, m.queriedGlobal), tea.WindowSize())
 	}
 	return tea.Batch(spinner.Tick, m.startLoadCmd(), scheduleRefresh(), tea.WindowSize())
+}
+
+func (m model) regionStatsSnapshot() (map[string]int, map[string]struct{}) {
+	counts := make(map[string]int, len(m.regionCounts))
+	for k, v := range m.regionCounts {
+		counts[k] = v
+	}
+	queried := make(map[string]struct{}, len(m.queriedRegions))
+	for k := range m.queriedRegions {
+		queried[k] = struct{}{}
+	}
+	return counts, queried
+}
+
+func (m model) scopeRegions() []string {
+	if len(m.activeRegions) > 0 {
+		out := make([]string, 0, len(m.activeRegions))
+		for _, r := range m.activeRegions {
+			r = strings.TrimSpace(r)
+			if r == "" {
+				continue
+			}
+			out = append(out, r)
+		}
+		return out
+	}
+	region := strings.TrimSpace(m.itn.Region())
+	if region == "" || strings.EqualFold(region, "global") {
+		return nil
+	}
+	return []string{region}
+}
+
+func (m *model) updateRegionStats(instances []ec2types.Instance) {
+	counts := map[string]int{}
+	for _, inst := range instances {
+		r := regionFromAZ(instanceAZ(inst))
+		if r == "" || r == "-" {
+			continue
+		}
+		counts[r]++
+	}
+
+	if m.globalMode {
+		m.queriedGlobal = true
+		m.regionCounts = counts
+		return
+	}
+
+	for _, r := range m.scopeRegions() {
+		m.queriedRegions[r] = struct{}{}
+		m.regionCounts[r] = 0
+	}
+	for r, c := range counts {
+		m.queriedRegions[r] = struct{}{}
+		m.regionCounts[r] = c
+	}
 }
 
 func (m *model) syncRows() {
