@@ -77,7 +77,7 @@ func main() {
 			if endpoint == "" {
 				endpoint = strings.TrimSpace(os.Getenv("ENDPOINT"))
 			}
-			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
+			cfg, err := config.LoadDefaultConfig(ctx, awsLoadOptions(options.region, options.profile)...)
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
@@ -138,7 +138,7 @@ func main() {
 			if endpoint == "" {
 				endpoint = strings.TrimSpace(os.Getenv("ENDPOINT"))
 			}
-			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
+			cfg, err := config.LoadDefaultConfig(ctx, awsLoadOptions(options.region, options.profile)...)
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
@@ -203,7 +203,7 @@ func main() {
 			if endpoint == "" {
 				endpoint = strings.TrimSpace(os.Getenv("ENDPOINT"))
 			}
-			cfg, err := config.LoadDefaultConfig(ctx, config.WithRegion(options.region), config.WithSharedConfigProfile(options.profile))
+			cfg, err := config.LoadDefaultConfig(ctx, awsLoadOptions(options.region, options.profile)...)
 			if err != nil {
 				fmt.Printf("❌ %s\n", err)
 				os.Exit(1)
@@ -247,4 +247,15 @@ func withMockCredentials(cfg aws.Config, endpoint string) aws.Config {
 	}
 	cfg.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider("mock-access-key", "mock-secret-key", "mock-session-token"))
 	return cfg
+}
+
+func awsLoadOptions(region, profile string) []func(*config.LoadOptions) error {
+	var opts []func(*config.LoadOptions) error
+	if r := strings.TrimSpace(region); r != "" {
+		opts = append(opts, config.WithRegion(r))
+	}
+	if p := strings.TrimSpace(profile); p != "" {
+		opts = append(opts, config.WithSharedConfigProfile(p))
+	}
+	return opts
 }
