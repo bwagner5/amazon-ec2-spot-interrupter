@@ -24,6 +24,7 @@ import (
 )
 
 var chaosWarningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+var regionHighlightStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("86"))
 
 func (m model) View() string {
 	if m.width == 0 || m.height == 0 {
@@ -135,7 +136,7 @@ func (m model) footerView() string {
 	case m.showTagModal:
 		return "Tag filter: enter apply | tab/right next | shift+tab/left previous | up/down suggestions | use *=no filter | esc close"
 	case m.showRegionModal:
-		return "Region scope: enter apply | up/down move | esc close"
+		return "Region scope: space toggle | enter apply | x clear all | up/down move | esc close"
 	case m.showChaosModal:
 		snapshot := m.chaos.Snapshot()
 		if snapshot.Running {
@@ -164,13 +165,36 @@ func (m model) regionModalView() string {
 	if len(m.regionChoices) == 0 {
 		return frameStyle.Width(width).Render("No regions available")
 	}
-	lines := []string{"Region Scope", "enter apply | esc close", ""}
+	lines := []string{titleStyle.Render("Region Scope"), ""}
 	for i, r := range m.regionChoices {
-		prefix := "  "
+		cursor := "  "
 		if i == m.regionCursor {
-			prefix = "> "
+			cursor = "> "
 		}
-		lines = append(lines, prefix+r)
+		check := "[ ] "
+		if _, ok := m.regionSelected[i]; ok {
+			check = "[x] "
+		}
+		// For GLOBAL row, show checked if all regions are selected
+		if m.regionValues[i] == "GLOBAL" {
+			allSelected := len(m.regionValues) > 1
+			for j := 1; j < len(m.regionValues); j++ {
+				if _, ok := m.regionSelected[j]; !ok {
+					allSelected = false
+					break
+				}
+			}
+			if allSelected {
+				check = "[x] "
+			} else {
+				check = "[ ] "
+			}
+		}
+		line := cursor + check + r
+		if i == m.regionCursor {
+			line = regionHighlightStyle.Render(line)
+		}
+		lines = append(lines, line)
 	}
 	return frameStyle.Width(width).Render(strings.Join(lines, "\n"))
 }

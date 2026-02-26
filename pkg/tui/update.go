@@ -209,7 +209,7 @@ func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.tagKeyInput.Blur()
 		m.tagValueInput.Blur()
 		return m, nil
-	case "tab", "right":
+	case "tab":
 		if m.tagFocus == 0 && len(m.tagSuggestions) > 0 && m.tagCursor >= 0 && m.tagCursor < len(m.tagSuggestions) {
 			m.tagKeyInput.SetValue(m.tagSuggestions[m.tagCursor])
 		}
@@ -218,7 +218,7 @@ func (m model) handleTagModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 		m.tagValueInput.Focus()
 		m.updateTagSuggestions()
 		return m, nil
-	case "shift+tab", "left":
+	case "shift+tab":
 		m.tagFocus = 0
 		m.tagValueInput.Blur()
 		m.tagKeyInput.Focus()
@@ -306,19 +306,67 @@ func (m model) handleRegionModalKey(msg tea.KeyMsg) (model, tea.Cmd) {
 			m.regionCursor++
 		}
 		return m, nil
-	case "enter":
+	case " ":
 		if len(m.regionChoices) == 0 || m.regionModalBusy {
 			return m, nil
 		}
+		if m.regionSelected == nil {
+			m.regionSelected = map[int]struct{}{}
+		}
 		choice := m.regionValues[m.regionCursor]
+		if choice == "GLOBAL" {
+			// Global toggles all non-GLOBAL entries
+			allSelected := true
+			for i := 1; i < len(m.regionValues); i++ {
+				if _, ok := m.regionSelected[i]; !ok {
+					allSelected = false
+					break
+				}
+			}
+			if allSelected {
+				m.regionSelected = map[int]struct{}{}
+			} else {
+				for i := 1; i < len(m.regionValues); i++ {
+					m.regionSelected[i] = struct{}{}
+				}
+			}
+		} else {
+			if _, ok := m.regionSelected[m.regionCursor]; ok {
+				delete(m.regionSelected, m.regionCursor)
+			} else {
+				m.regionSelected[m.regionCursor] = struct{}{}
+			}
+		}
+		return m, nil
+	case "x":
+		// Clear all selections
+		m.regionSelected = map[int]struct{}{}
+		return m, nil
+	case "enter":
+		if len(m.regionChoices) == 0 || m.regionModalBusy || len(m.regionSelected) == 0 {
+			return m, nil
+		}
 		m.showRegionModal = false
 		m.requireRegionSelection = false
-		if choice == "GLOBAL" {
+		// Check if all non-GLOBAL regions are selected
+		allSelected := true
+		for i := 1; i < len(m.regionValues); i++ {
+			if _, ok := m.regionSelected[i]; !ok {
+				allSelected = false
+				break
+			}
+		}
+		if allSelected {
 			m.globalMode = true
 			m.activeRegions = nil
 		} else {
 			m.globalMode = false
-			m.activeRegions = []string{choice}
+			m.activeRegions = nil
+			for i := 1; i < len(m.regionValues); i++ {
+				if _, ok := m.regionSelected[i]; ok {
+					m.activeRegions = append(m.activeRegions, m.regionValues[i])
+				}
+			}
 		}
 		m.loading = true
 		return m, m.startLoadCmd()
@@ -378,15 +426,10 @@ func (m model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = true
 		m.status = "Refreshing Spot instance list..."
 		return m, m.startLoadCmd()
-	case key.Matches(msg, m.keys.Global):
-		m.globalMode = true
-		m.activeRegions = nil
-		m.loading = true
-		m.status = "Switching to global region scan..."
-		return m, m.startLoadCmd()
 	case key.Matches(msg, m.keys.RegionModal):
 		m.showRegionModal = true
 		m.regionCursor = 0
+		m.regionSelected = map[int]struct{}{}
 		m.regionModalBusy = true
 		m.regionChoices = nil
 		m.regionValues = nil

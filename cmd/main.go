@@ -241,7 +241,7 @@ func main() {
 	rootCmd.PersistentFlags().StringSliceVarP(&options.instanceIDs, "instance-ids", "i", []string{}, "instance IDs to interrupt")
 	rootCmd.PersistentFlags().StringArrayVar(&options.filters, "filter", []string{}, "AWS-style filter selector, e.g. Name=tag:Name,Values=worker-a")
 	rootCmd.PersistentFlags().StringVarP(&options.output, "output", "o", "none", "report output format: none,json,yaml,table,markdown")
-	rootCmd.PersistentFlags().StringVar(&options.endpoint, "endpoint", "", "override AWS API endpoint (also supports ENDPOINT env var)")
+	rootCmd.PersistentFlags().StringVarP(&options.endpoint, "endpoint", "e", "", "override AWS API endpoint (also supports ENDPOINT env var)")
 	rootCmd.PersistentFlags().BoolVarP(&options.clean, "clean", "c", true, "clean up the underlying simulations")
 	rootCmd.PersistentFlags().DurationVarP(&options.delay, "delay", "d", time.Second*15, "duration until the interruption notification is sent")
 	rootCmd.PersistentFlags().BoolVarP(&options.version, "version", "v", false, "the version")

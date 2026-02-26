@@ -47,7 +47,6 @@ type listKeyMap struct {
 	Refresh     key.Binding
 	Search      key.Binding
 	Monitor     key.Binding
-	Global      key.Binding
 	RegionModal key.Binding
 	TagFilter   key.Binding
 	Chaos       key.Binding
@@ -60,7 +59,7 @@ func (k listKeyMap) ShortHelp() []key.Binding {
 }
 
 func (k listKeyMap) FullHelp() [][]key.Binding {
-	return [][]key.Binding{{k.Up, k.Down, k.Select, k.SelectAll}, {k.Clear, k.Refresh, k.Search, k.TagFilter, k.Chaos, k.Monitor, k.Global, k.RegionModal, k.Open, k.Quit}}
+	return [][]key.Binding{{k.Up, k.Down, k.Select, k.SelectAll}, {k.Clear, k.Refresh, k.Search, k.TagFilter, k.Chaos, k.Monitor, k.RegionModal, k.Open, k.Quit}}
 }
 
 func defaultListKeys() listKeyMap {
@@ -72,8 +71,7 @@ func defaultListKeys() listKeyMap {
 		Clear:       key.NewBinding(key.WithKeys("x"), key.WithHelp("x", "clear")),
 		Refresh:     key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "refresh")),
 		Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
-		Monitor:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "open experiment")),
-		Global:      key.NewBinding(key.WithKeys("g"), key.WithHelp("g", "query global")),
+		Monitor:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "view experiments")),
 		RegionModal: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "region filter")),
 		TagFilter:   key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "tag filter")),
 		Chaos:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "chaos mode")),
@@ -112,6 +110,7 @@ type model struct {
 	queriedGlobal          bool
 	regionChoices          []string
 	regionCursor           int
+	regionSelected         map[int]struct{}
 	showRegionModal        bool
 	regionModalBusy        bool
 	requireRegionSelection bool
